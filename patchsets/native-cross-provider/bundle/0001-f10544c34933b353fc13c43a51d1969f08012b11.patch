@@ -1,0 +1,499 @@
+From f10544c34933b353fc13c43a51d1969f08012b11 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 08:34:36 +0000
+Subject: [PATCH] Support provider selection for native subagents
+
+
+diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
+index 96d9675f63a5d9b82723967950319e46c4ef5694..51b4402db8b0d9d7f06afcf8080a6ebf4082484d 100644
+--- a/codex-rs/core/src/agent/child_config.rs
++++ b/codex-rs/core/src/agent/child_config.rs
+@@ -11,13 +11,16 @@ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use codex_features::Feature;
+ use codex_models_manager::manager::RefreshStrategy;
++use codex_models_manager::manager::SharedModelsManager;
+ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+ use codex_protocol::models::BaseInstructions;
++use codex_protocol::models::BaseInstructionsProvenance;
+ use codex_protocol::openai_models::ModelOrigin;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::openai_models::ReasoningEffortPreset;
+ use codex_protocol::protocol::MultiAgentVersion;
++use std::sync::Arc;
+ 
+ pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
+ 
+@@ -41,6 +44,7 @@ pub(crate) struct SpawnConfigOptions<'a> {
+     pub(crate) full_history_fork: bool,
+     pub(crate) role_name: Option<&'a str>,
+     pub(crate) model: Option<&'a str>,
++    pub(crate) model_provider: Option<&'a str>,
+     pub(crate) reasoning_effort: Option<ReasoningEffort>,
+ }
+ 
+@@ -61,18 +65,41 @@ pub(crate) async fn prepare_agent_spawn_config(
+     if options.version == SpawnConfigVersion::V1 && options.full_history_fork {
+         reject_full_fork_agent_type_override(options.role_name)?;
+     }
++    let provider_switched = if let Some(provider) = options.model_provider {
++        let switched = select_agent_model_provider(&mut config, provider)?;
++        if switched && options.full_history_fork {
++            return Err("Cross-provider full-history forks are unsupported; specify model_provider and model with fork_turns=none (or fork_context=false).".to_string());
++        }
++        if switched && options.model.is_none_or(|model| model.trim().is_empty()) {
++            return Err(
++                "Switching model_provider requires an explicit nonempty model.".to_string(),
++            );
++        }
++        switched
++    } else {
++        false
++    };
++    let models_manager = spawn_models_manager(session, &config, provider_switched);
+     apply_requested_spawn_agent_model_overrides(
+-        session,
+         step_context,
+         &mut config,
+         options.model,
+         options.reasoning_effort,
++        &models_manager,
++        options.model_provider.is_some(),
++        provider_switched,
+     )
+     .await?;
++    let selected_model = config.model.clone();
++    let selected_effort = config.model_reasoning_effort.clone();
+     if !options.full_history_fork
+         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
+     {
+-        apply_spawn_agent_role(session, &mut config, options.role_name).await?;
++        if provider_switched {
++            apply_role_to_config(&mut config, options.role_name).await?;
++        } else {
++            apply_spawn_agent_role(&models_manager, &mut config, options.role_name).await?;
++        }
+         if options.version == SpawnConfigVersion::V2
+             && options.full_history_fork
+             && config.developer_instructions.is_none()
+@@ -82,7 +109,14 @@ pub(crate) async fn prepare_agent_spawn_config(
+                 .clone_from(&turn.developer_instructions);
+         }
+     }
+-    apply_spawn_agent_service_tier(session, &mut config).await?;
++    if provider_switched {
++        // The explicit cross-provider model must not be replaced by a role configured for the parent.
++        config.model = selected_model;
++        config.model_reasoning_effort = selected_effort;
++        config.service_tier = None;
++    } else {
++        apply_spawn_agent_service_tier(session, &mut config).await?;
++    }
+     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
+ 
+     // Remember an applied configured default so cold reload reapplies its restrictions.
+@@ -101,6 +135,64 @@ pub(crate) async fn prepare_agent_spawn_config(
+     Ok(PreparedSpawnConfig { config, role_name })
+ }
+ 
++/// Select a registered provider while respecting managed policy. Returns whether it changed.
++pub(crate) fn select_agent_model_provider(config: &mut Config, id: &str) -> Result<bool, String> {
++    let id = id.trim();
++    if id.is_empty() {
++        return Err("model_provider must be a nonempty configured provider ID.".to_string());
++    }
++    if let Some(required) = config.config_layer_stack.required_model_provider()
++        && required != id
++    {
++        return Err(format!(
++            "model_provider is managed and must be `{required}`."
++        ));
++    }
++    if config.model_provider_id == id {
++        return Ok(false);
++    }
++    let provider = config
++        .model_providers
++        .get(id)
++        .ok_or_else(|| format!("Unknown model_provider `{id}`; use a configured provider ID."))?
++        .clone();
++    config.model_provider_id = id.to_string();
++    config.model_provider = provider;
++    config.model_catalog = None;
++    config.model_context_window = None;
++    config.model_auto_compact_token_limit = None;
++    config.model_reasoning_effort = None;
++    config.model_reasoning_summary = None;
++    config.model_verbosity = None;
++    config.service_tier = None;
++    if matches!(
++        config.base_instructions_provenance,
++        Some(BaseInstructionsProvenance::Model { .. })
++    ) {
++        config.base_instructions = None;
++        config.base_instructions_provenance = None;
++    }
++    Ok(true)
++}
++
++fn spawn_models_manager(
++    session: &Session,
++    config: &Config,
++    provider_switched: bool,
++) -> SharedModelsManager {
++    if !provider_switched {
++        return Arc::clone(&session.services.models_manager);
++    }
++    let credentials = Arc::clone(&session.services.auth_manager);
++    let runtime = crate::runtime_auth::runtime_for_config(
++        &session.services.runtime_auth,
++        config,
++        Arc::clone(&credentials),
++        &session.installation_id,
++    );
++    crate::thread_manager::build_models_manager(config, credentials, runtime)
++}
++
+ /// Builds the base config snapshot for a newly spawned sub-agent.
+ ///
+ /// The returned config starts from the parent's effective config and then refreshes the
+@@ -203,44 +295,64 @@ fn apply_spawn_agent_runtime_overrides(
+ }
+ 
+ async fn apply_requested_spawn_agent_model_overrides(
+-    session: &Session,
+     step_context: &StepContext,
+     config: &mut Config,
+     requested_model: Option<&str>,
+     requested_reasoning_effort: Option<ReasoningEffort>,
++    models_manager: &SharedModelsManager,
++    provider_explicit: bool,
++    provider_switched: bool,
+ ) -> Result<(), String> {
+     let turn = step_context.turn.as_ref();
+-    let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
+-    let requested_reasoning_effort = requested_reasoning_effort
+-        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
++    let requested_model = requested_model.or_else(|| {
++        (!provider_switched)
++            .then_some(turn.config.agent_default_subagent_model.as_deref())
++            .flatten()
++    });
++    let requested_reasoning_effort = requested_reasoning_effort.or_else(|| {
++        (!provider_switched)
++            .then(|| turn.config.agent_default_subagent_reasoning_effort.clone())
++            .flatten()
++    });
+     if requested_model.is_none() && requested_reasoning_effort.is_none() {
+         return Ok(());
+     }
+ 
+     if let Some(requested_model) = requested_model {
+-        let available_models = session
+-            .services
+-            .models_manager
++        let available_models = models_manager
+             .list_models(RefreshStrategy::Offline, config.http_client_factory())
+             .await;
+-        let selected_model_name = find_spawn_agent_model_name(
++        let selected_model_name = match find_spawn_agent_model_name(
+             &available_models,
+             requested_model,
+             turn.multi_agent_version,
+-        )?;
+-        let selected_model_info = session
+-            .services
+-            .models_manager
++        ) {
++            Ok(model) => model,
++            Err(_)
++                if provider_explicit
++                    && config.model_provider_id != "openai"
++                    && !available_models
++                        .iter()
++                        .any(|model| model.model == requested_model)
++                    && !requested_model.trim().is_empty() =>
++            {
++                requested_model.to_string()
++            }
++            Err(err) => return Err(err),
++        };
++        let selected_model_info = models_manager
+             .get_model_info(&selected_model_name, &config.to_models_manager_config())
+             .await;
+ 
+         config.model = Some(selected_model_name.clone());
+         if let Some(reasoning_effort) = requested_reasoning_effort {
+-            validate_spawn_agent_reasoning_effort(
+-                &selected_model_name,
+-                &selected_model_info.supported_reasoning_levels,
+-                &reasoning_effort,
+-            )?;
++            if selected_model_info.origin != ModelOrigin::Synthetic {
++                validate_spawn_agent_reasoning_effort(
++                    &selected_model_name,
++                    &selected_model_info.supported_reasoning_levels,
++                    &reasoning_effort,
++                )?;
++            }
+             config.model_reasoning_effort = Some(reasoning_effort);
+         } else {
+             config.model_reasoning_effort = selected_model_info.default_reasoning_level.clone();
+@@ -290,7 +402,7 @@ pub(crate) async fn apply_spawn_agent_service_tier(
+ }
+ 
+ async fn apply_spawn_agent_role(
+-    session: &Session,
++    models_manager: &SharedModelsManager,
+     config: &mut Config,
+     role_name: Option<&str>,
+ ) -> Result<(), String> {
+@@ -308,9 +420,7 @@ async fn apply_spawn_agent_role(
+     let model = config.model.clone().ok_or_else(|| {
+         "spawn_agent could not resolve the child model for reasoning effort validation".to_string()
+     })?;
+-    let model_info = session
+-        .services
+-        .models_manager
++    let model_info = models_manager
+         .get_model_info(&model, &config.to_models_manager_config())
+         .await;
+     if model_info.origin == ModelOrigin::Synthetic {
+diff --git a/codex-rs/core/src/agent/host/spawn_tests.rs b/codex-rs/core/src/agent/host/spawn_tests.rs
+index 31bb8cf03c2245d8dffcaee7ae2cdd1433778eac..41d74508af7241100b61b622ae94180172866038 100644
+--- a/codex-rs/core/src/agent/host/spawn_tests.rs
++++ b/codex-rs/core/src/agent/host/spawn_tests.rs
+@@ -193,6 +193,7 @@ async fn same_manager_creation_retains_step_executor_and_shares_exec_policy() ->
+                 fork_mode: None,
+                 agent_type: None,
+                 model: None,
++                model_provider: None,
+                 reasoning_effort: None,
+             },
+             HostThreadSpawnReservation {
+diff --git a/codex-rs/core/src/thread_spawn.rs b/codex-rs/core/src/thread_spawn.rs
+index 4623a50c0889b50126b9a100d2ee30036947dbba..0b91d7f5d83aadbcd374d4d548f3fa8c9729caca 100644
+--- a/codex-rs/core/src/thread_spawn.rs
++++ b/codex-rs/core/src/thread_spawn.rs
+@@ -33,6 +33,7 @@ pub struct ThreadCreateRequest {
+     pub fork_mode: Option<SpawnAgentForkMode>,
+     pub agent_type: Option<String>,
+     pub model: Option<String>,
++    pub model_provider: Option<String>,
+     pub reasoning_effort: Option<ReasoningEffort>,
+ }
+ 
+@@ -44,6 +45,7 @@ pub(crate) struct ThreadSpawnRequest {
+     pub fork_mode: Option<SpawnAgentForkMode>,
+     pub agent_type: Option<String>,
+     pub model: Option<String>,
++    pub model_provider: Option<String>,
+     pub reasoning_effort: Option<ReasoningEffort>,
+ }
+ 
+@@ -65,6 +67,7 @@ impl ThreadSpawnRequest {
+                 fork_mode: self.fork_mode,
+                 agent_type: self.agent_type,
+                 model: self.model,
++                model_provider: self.model_provider,
+                 reasoning_effort: self.reasoning_effort,
+             },
+             self.message,
+@@ -133,6 +136,7 @@ pub(crate) async fn prepare(
+         fork_mode,
+         agent_type,
+         model,
++        model_provider,
+         reasoning_effort,
+     } = request;
+     let role_name = agent_type
+@@ -147,6 +151,7 @@ pub(crate) async fn prepare(
+             full_history_fork: matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)),
+             role_name,
+             model: model.as_deref(),
++            model_provider: model_provider.as_deref(),
+             reasoning_effort,
+         },
+     )
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+index 839874dbbfa8e971a2f16d010c51d7ead3bc6821..93c3899b17db6ae912fe97cf00755739e1bcec99 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents/spawn.rs
+@@ -103,6 +103,7 @@ async fn handle_spawn_agent(
+             full_history_fork: args.fork_context,
+             role_name,
+             model: args.model.as_deref(),
++            model_provider: args.model_provider.as_deref(),
+             reasoning_effort: args.reasoning_effort.clone(),
+         },
+     )
+@@ -222,6 +223,7 @@ struct SpawnAgentArgs {
+     items: Option<Vec<UserInput>>,
+     agent_type: Option<String>,
+     model: Option<String>,
++    model_provider: Option<String>,
+     reasoning_effort: Option<ReasoningEffort>,
+     #[serde(default)]
+     fork_context: bool,
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+index edc9467b4d02cc023d8961373637116cf8ba6f6f..6f55a752dcfe14cc8f65806d6b47f378b6c05fc5 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -128,6 +128,7 @@ pub fn create_spawn_agent_tool_v2(
+     }
+     if !options.expose_spawn_agent_model_overrides {
+         properties.remove("model");
++        properties.remove("model_provider");
+         properties.remove("reasoning_effort");
+     }
+     properties.insert(
+@@ -636,6 +637,12 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
+                 SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION.to_string(),
+             )),
+         ),
++        (
++            "model_provider".to_string(),
++            JsonSchema::string(Some(
++                "Configured model provider ID. When switching providers, specify an explicit model and start without parent history (fork_turns=none or fork_context=false).".to_string(),
++            )),
++        ),
+         (
+             "reasoning_effort".to_string(),
+             JsonSchema::string(Some(
+@@ -673,6 +680,12 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
+                 SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION.to_string(),
+             )),
+         ),
++        (
++            "model_provider".to_string(),
++            JsonSchema::string(Some(
++                "Configured model provider ID. When switching providers, specify an explicit model and start without parent history (fork_turns=none or fork_context=false).".to_string(),
++            )),
++        ),
+         (
+             "reasoning_effort".to_string(),
+             JsonSchema::string(Some(
+@@ -686,6 +699,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
+ fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
+     properties.remove("agent_type");
+     properties.remove("model");
++    properties.remove("model_provider");
+     properties.remove("reasoning_effort");
+ }
+ 
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
+index d74729ef218b40dd244f1497e34439c765bfcdae..444c81e743216dcb5154cf059b1485a820eaaf47 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
+@@ -48,6 +48,7 @@ fn spawn_agent_tool_v2_requires_task_name() {
+         Some(true)
+     );
+     assert!(properties.contains_key("fork_turns"));
++    assert!(properties.contains_key("model_provider"));
+     assert!(!properties.contains_key("items"));
+     assert!(!properties.contains_key("fork_context"));
+     assert_eq!(
+@@ -142,6 +143,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
+ 
+     assert!(properties.contains_key("fork_context"));
+     assert!(!properties.contains_key("fork_turns"));
++    assert!(properties.contains_key("model_provider"));
+     assert_eq!(
+         properties.get("agent_type"),
+         Some(&JsonSchema::string(Some(format!(
+@@ -232,7 +234,13 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
+         .as_ref()
+         .expect("spawn_agent should use object params");
+ 
+-    for property in ["agent_type", "model", "reasoning_effort", "service_tier"] {
++    for property in [
++        "agent_type",
++        "model",
++        "model_provider",
++        "reasoning_effort",
++        "service_tier",
++    ] {
+         assert!(!properties.contains_key(property));
+     }
+     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 254f60302999198dba5057787ac7a89e3f34e51f..af00b9b943d38fc2bbb381c76b1caa1321bcab56 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -5,6 +5,7 @@ use crate::ThreadStoreBuilder;
+ use crate::agent::child_config::apply_spawn_agent_service_tier;
+ use crate::agent::child_config::build_agent_resume_config;
+ use crate::agent::child_config::build_agent_spawn_config;
++use crate::agent::child_config::select_agent_model_provider;
+ use crate::config::AgentRoleConfig;
+ use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+ use crate::config::PermissionProfileSnapshot;
+@@ -4741,3 +4742,35 @@ async fn build_agent_resume_config_clears_base_instructions() {
+         .expect("approval policy set");
+     assert_eq!(config, expected);
+ }
++
++#[tokio::test]
++async fn selecting_child_provider_resets_model_specific_settings() {
++    let (_session, turn) = make_session_and_context().await;
++    let mut config = (*turn.config).clone();
++    let providers = built_in_model_providers(None);
++    config
++        .model_providers
++        .insert("ollama".to_string(), providers["ollama"].clone());
++    config.model_provider_id = "openai".to_string();
++    config.model_provider = providers["openai"].clone();
++    config.model_context_window = Some(1234);
++    config.model_auto_compact_token_limit = Some(1000);
++    config.model_reasoning_effort = Some(ReasoningEffort::High);
++    config.model_reasoning_summary = Some(ReasoningSummary::Auto);
++    config.service_tier = Some("priority".to_string());
++    config.base_instructions = Some("parent model instructions".to_string());
++    config.base_instructions_provenance = Some(BaseInstructionsProvenance::Model {
++        model: "parent".to_string(),
++    });
++
++    assert!(select_agent_model_provider(&mut config, "ollama").unwrap());
++    assert_eq!(config.model_provider_id, "ollama");
++    assert!(config.model_context_window.is_none());
++    assert!(config.model_auto_compact_token_limit.is_none());
++    assert!(config.model_reasoning_effort.is_none());
++    assert!(config.model_reasoning_summary.is_none());
++    assert!(config.service_tier.is_none());
++    assert!(config.base_instructions.is_none());
++    assert!(!select_agent_model_provider(&mut config, "ollama").unwrap());
++    assert!(select_agent_model_provider(&mut config, "missing").is_err());
++}
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+index c23caa014599fb37ab77738a82396a0cb81cb7c1..a68ef3f75a75f253ff12db189c63ae5ca16e40ad 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+@@ -131,6 +131,7 @@ async fn handle_spawn_agent(
+             fork_mode: fork_mode.clone(),
+             agent_type: args.agent_type.clone(),
+             model: args.model,
++            model_provider: args.model_provider,
+             reasoning_effort: args.reasoning_effort,
+         },
+     )
+@@ -205,6 +206,7 @@ struct SpawnAgentArgs {
+     task_name: String,
+     agent_type: Option<String>,
+     model: Option<String>,
++    model_provider: Option<String>,
+     reasoning_effort: Option<ReasoningEffort>,
+     fork_turns: Option<String>,
+     fork_context: Option<bool>,
+diff --git a/codex-rs/core/tests/suite/scenarios_reserved_spawn.rs b/codex-rs/core/tests/suite/scenarios_reserved_spawn.rs
+index 5e2a1125ba900cd77e55d26835e80131a3d92c8a..42345fc7edda7a6abb627d7bbe70718003388199 100644
+--- a/codex-rs/core/tests/suite/scenarios_reserved_spawn.rs
++++ b/codex-rs/core/tests/suite/scenarios_reserved_spawn.rs
+@@ -161,6 +161,7 @@ fn create_request(name: &str, fork_history: bool) -> ThreadCreateRequest {
+         fork_mode: fork_history.then_some(SpawnAgentForkMode::FullHistory),
+         agent_type: None,
+         model: None,
++        model_provider: None,
+         reasoning_effort: None,
+     }
+ }

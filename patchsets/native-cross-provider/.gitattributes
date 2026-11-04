@@ -1,0 +1,5 @@
+# Preserve exact patch bytes: SHA-256 in the manifest covers these files.
+bundle/*.patch -text whitespace=-blank-at-eol
+bundle/manifest.json text eol=lf
+cross_provider_patchset.py text eol=lf
+README.md text eol=lf

@@ -1,0 +1,30 @@
+From 914c2739b2ec16ed75be0087ddc5d6fd381dd20e Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 08:49:28 +0000
+Subject: [PATCH] Document nested role models and provider-qualified service
+ tiers
+
+
+diff --git a/docs/cross-provider-subagents.md b/docs/cross-provider-subagents.md
+index b9ecf08de08cac57f5bb20342cf0d5bc38fcabb5..0efcc7061ff78b3ec32d2b98da05496925e1ea4a 100644
+--- a/docs/cross-provider-subagents.md
++++ b/docs/cross-provider-subagents.md
+@@ -41,7 +41,17 @@ role, in both V1 and V2, instead of routing it through the resuming parent's
+ provider. Provider-specific model selection, reasoning, catalog, service-tier,
+ and context-limit state inherited from the parent is cleared when switching. A
+ role's parent-oriented model setting cannot replace the explicitly selected
+-cross-provider model and effort.
++cross-provider model and effort on the initial spawn. Later nested spawns that
++stay on the child's provider still apply the configured role model normally;
++that model ID must be valid at that provider. Use a model-neutral default role
++for mixed-provider trees, or explicitly configure provider-appropriate role
++models, rather than an OpenAI-specific default model for OpenRouter descendants.
++
++Root service-tier inheritance is qualified by provider ID. A child receives the
++root tier only while using the root provider; switching away clears it, and a
++descendant that switches back can inherit it again. Hosts implementing the
++`AgentControl` trait must update to the provider-qualified
++`service_tier(provider_id)` and tier-update interfaces when porting this change.
+ 
+ No independent subprocess, second agent framework, or chat-completions bridge is
+ involved. The reusable implementation points are:

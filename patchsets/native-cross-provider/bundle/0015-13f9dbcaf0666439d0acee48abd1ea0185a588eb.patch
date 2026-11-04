@@ -1,0 +1,342 @@
+From 13f9dbcaf0666439d0acee48abd1ea0185a588eb Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 08:50:10 +0000
+Subject: [PATCH] fix(core): scope inherited service tiers to their provider
+
+
+diff --git a/codex-rs/core/src/agent/api.rs b/codex-rs/core/src/agent/api.rs
+index e23f1ead6b26ad1c1f207ba4005dad07d5972194..9d60478c46f529152a4657de2652ccdf930ffd1a 100644
+--- a/codex-rs/core/src/agent/api.rs
++++ b/codex-rs/core/src/agent/api.rs
+@@ -135,8 +135,8 @@ pub trait AgentControl: Send + Sync {
+         trace: &'a ThreadTraceContext,
+     ) -> BoxFuture<'a, ()>;
+ 
+-    /// Read the latest shared service tier for use at normal runtime config update points.
+-    fn service_tier(&self) -> Option<String>;
++    /// Read the root's latest service tier only for its selected provider.
++    fn service_tier(&self, provider_id: &str) -> Option<String>;
+ 
+     /// Publish a shared setting synchronously with the runtime's root-owned config update.
+     fn propagate_config_update(&self, update: AgentConfigUpdate);
+@@ -246,5 +246,8 @@ pub struct AgentTurnOutcome {
+ /// Settings shared by the tree. A service tier of `None` restores the default tier.
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub enum AgentConfigUpdate {
+-    ServiceTier(Option<String>),
++    ServiceTier {
++        provider_id: String,
++        service_tier: Option<String>,
++    },
+ }
+diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
+index 1fb08bd530b6e8e7db89d1bcbd358d2b8ab6ef4a..eb6dd9fc54506f7e3a8dea28f4b2c6de39872b87 100644
+--- a/codex-rs/core/src/agent/child_config.rs
++++ b/codex-rs/core/src/agent/child_config.rs
+@@ -395,7 +395,11 @@ pub(crate) async fn apply_spawn_agent_service_tier(
+     session: &Session,
+     config: &mut Config,
+ ) -> Result<(), String> {
+-    let Some(service_tier) = session.services.agent_control.service_tier() else {
++    let Some(service_tier) = session
++        .services
++        .agent_control
++        .service_tier(&config.model_provider_id)
++    else {
+         config.service_tier = None;
+         return Ok(());
+     };
+diff --git a/codex-rs/core/src/agent/control/api.rs b/codex-rs/core/src/agent/control/api.rs
+index 0426ca39d863e50079b1c5bfefab898088c91461..623592b2a17c498a79e5e60626ee8f6db40b854a 100644
+--- a/codex-rs/core/src/agent/control/api.rs
++++ b/codex-rs/core/src/agent/control/api.rs
+@@ -294,13 +294,16 @@ impl AgentControl for LocalAgentControl {
+         Box::pin(self.notify_parent_of_terminal_turn(outcome, trace))
+     }
+ 
+-    fn service_tier(&self) -> Option<String> {
+-        self.root_service_tier()
++    fn service_tier(&self, provider_id: &str) -> Option<String> {
++        self.root_service_tier(provider_id)
+     }
+ 
+     fn propagate_config_update(&self, update: AgentConfigUpdate) {
+         match update {
+-            AgentConfigUpdate::ServiceTier(tier) => self.set_root_service_tier(tier),
++            AgentConfigUpdate::ServiceTier {
++                provider_id,
++                service_tier,
++            } => self.set_root_service_tier(provider_id, service_tier),
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index fc591ec41f404a88d67002bc69dac8448fc31128..e0704796c945553f186e68cf26ba1971706abb4f 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -202,8 +202,8 @@ pub(crate) struct LocalAgentRuntime {
+     pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
+     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
+     pub(super) rollout_budget: Arc<RolloutBudget>,
+-    /// The user-selected root routing tier, shared by the entire agent tree.
+-    pub(super) root_service_tier: Arc<ArcSwapOption<String>>,
++    /// The root's provider and selected routing tier, shared atomically by the agent tree.
++    pub(super) root_service_tier: Arc<ArcSwapOption<super::service_tier::RootServiceTier>>,
+     /// Retains the root's opt-in instruction provider even when the root is unloaded.
+     pub(super) shared_thread_instructions_provider:
+         Arc<OnceLock<Arc<dyn ThreadInstructionsProvider>>>,
+diff --git a/codex-rs/core/src/agent/control/service_tier.rs b/codex-rs/core/src/agent/control/service_tier.rs
+index 3324cebfbbc49c21126605c65091c57522819015..96aa5826b694ff2736b7893a23a4ffb11468238d 100644
+--- a/codex-rs/core/src/agent/control/service_tier.rs
++++ b/codex-rs/core/src/agent/control/service_tier.rs
+@@ -1,21 +1,66 @@
+-//! Shares the root user's selected routing tier across the entire agent tree.
++//! Shares the root user's selected routing tier with descendants using its provider.
+ 
+ use super::LocalAgentControl;
+ use std::sync::Arc;
+ 
++pub(super) struct RootServiceTier {
++    provider_id: String,
++    service_tier: String,
++}
++
+ impl LocalAgentControl {
+-    /// Returns the latest user-selected tier for this root and all its descendants.
+-    pub(crate) fn root_service_tier(&self) -> Option<String> {
++    /// Returns the latest root preference only within its provider boundary.
++    pub(crate) fn root_service_tier(&self, provider_id: &str) -> Option<String> {
+         self.runtime
+             .root_service_tier
+             .load_full()
+-            .map(|service_tier| (*service_tier).clone())
++            .filter(|selection| selection.provider_id == provider_id)
++            .map(|selection| selection.service_tier.clone())
+     }
+ 
+     /// Publishes a root-owned tier without mutating individual child sessions.
+-    pub(crate) fn set_root_service_tier(&self, service_tier: Option<String>) {
++    pub(crate) fn set_root_service_tier(&self, provider_id: String, service_tier: Option<String>) {
+         self.runtime
+             .root_service_tier
+-            .store(service_tier.map(Arc::new));
++            .store(service_tier.map(|service_tier| {
++                Arc::new(RootServiceTier {
++                    provider_id,
++                    service_tier,
++                })
++            }));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn shared_tier_follows_provider_and_live_root_updates() {
++        let control = LocalAgentControl::default();
++        let descendant = control.clone();
++        control.set_root_service_tier("openai".to_string(), Some("flex".to_string()));
++        assert_eq!(
++            descendant.root_service_tier("openai"),
++            Some("flex".to_string())
++        );
++        assert_eq!(descendant.root_service_tier("openrouter"), None);
++
++        control.set_root_service_tier("openai".to_string(), Some("priority".to_string()));
++        assert_eq!(descendant.root_service_tier("openrouter"), None);
++        // A descendant switching back to the root provider sees the latest preference.
++        assert_eq!(
++            descendant.root_service_tier("openai"),
++            Some("priority".to_string())
++        );
++
++        control.set_root_service_tier("openrouter".to_string(), Some("flex".to_string()));
++        assert_eq!(descendant.root_service_tier("openai"), None);
++        assert_eq!(
++            descendant.root_service_tier("openrouter"),
++            Some("flex".to_string())
++        );
++        control.set_root_service_tier("openrouter".to_string(), None);
++        assert_eq!(descendant.root_service_tier("openrouter"), None);
+     }
+ }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 87f572f4bd6db7c059f5af46ae9cf3faa0472d47..fd3ad5953f5010b904631f81f4c63beaccdbe262 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -385,7 +385,7 @@ impl LocalAgentControl {
+                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
+                 })?;
+         }
+-        config.service_tier = self.root_service_tier();
++        config.service_tier = self.root_service_tier(&stored_model_provider);
+         if let Some(model) = stored_model {
+             config.model = Some(model);
+         }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index e2b43fec186307d14ba7788301da6d98f108e37b..670fe91e42000c8de7bf4b82a4fdd491ea7cf64f 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2187,13 +2187,18 @@ impl Session {
+             state.session_configuration = updated;
+             if root_service_tier_changed {
+                 self.services.agent_control.propagate_config_update(
+-                    AgentConfigUpdate::ServiceTier(
+-                        state
++                    AgentConfigUpdate::ServiceTier {
++                        provider_id: state
++                            .session_configuration
++                            .original_config_do_not_use
++                            .model_provider_id
++                            .clone(),
++                        service_tier: state
+                             .session_configuration
+                             .step_settings
+                             .service_tier
+                             .clone(),
+-                    ),
++                    },
+                 );
+             }
+             let new_config = notify_config_contributors
+@@ -4236,7 +4241,10 @@ impl Session {
+             turn_context.session_source,
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+         ) {
+-            let root_service_tier = self.services.agent_control.service_tier();
++            let root_service_tier = self
++                .services
++                .agent_control
++                .service_tier(&turn_context.config.model_provider_id);
+             if settings.selected().service_tier != root_service_tier {
+                 let mut selected = settings.selected().clone();
+                 selected.service_tier = root_service_tier;
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 7677e922961e44f5d37f124069185abd7f042fc4..e85ed713bccfa3a4bb280c6d37906bf10b9530ae 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1081,13 +1081,14 @@ impl Session {
+                         .unwrap_or(usize::MAX),
+                 );
+                 if parent_thread_id.is_none() {
+-                    control.propagate_config_update(AgentConfigUpdate::ServiceTier(
+-                        session_configuration
++                    control.propagate_config_update(AgentConfigUpdate::ServiceTier {
++                        provider_id: config.model_provider_id.clone(),
++                        service_tier: session_configuration
+                             .step_settings
+                             .service_tier
+                             .clone()
+                             .or_else(|| config.service_tier.clone()),
+-                    ));
++                    });
+                 }
+                 let runtime = control.runtime.clone();
+                 (Arc::new(control), runtime)
+diff --git a/codex-rs/core/src/session/startup_prewarm.rs b/codex-rs/core/src/session/startup_prewarm.rs
+index 5d3fa4d681eb061f01dbd954e882cf59137236a7..522cdb8f62a00ff4613ba4c44fbf299b48d19900 100644
+--- a/codex-rs/core/src/session/startup_prewarm.rs
++++ b/codex-rs/core/src/session/startup_prewarm.rs
+@@ -340,14 +340,17 @@ async fn schedule_startup_prewarm_inner(
+     );
+     let startup_cancellation_token = CancellationToken::new();
+     let preconnect_model_info = Arc::clone(startup_turn_context.model_info());
+-    // Spawned subagents inherit the root's selection, with the same feature and model filtering
+-    // that capture applies to the actual request.
++    // Spawned subagents inherit the root's selection within the same provider, with the same
++    // feature and model filtering that capture applies to the actual request.
+     let preconnect_service_tier = if matches!(
+         startup_turn_context.session_source,
+         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+     ) {
+         crate::session::get_service_tier(
+-            session.services.agent_control.service_tier(),
++            session
++                .services
++                .agent_control
++                .service_tier(&startup_turn_context.config.model_provider_id),
+             &session.features(),
+             &preconnect_model_info,
+         )
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 98a39de42c8622b462798cbd172fd087fc108297..b6c63e52a27c6a568003821e58a84fce2253032f 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -2490,7 +2490,10 @@ impl ThreadManagerState {
+         // only after registration succeeds, so a failed start cannot update their tree.
+         let initial_host_config = (self.agent_control_factory.is_some()
+             && parent_thread_id.is_none())
+-        .then(|| AgentConfigUpdate::ServiceTier(config.service_tier.clone()));
++        .then(|| AgentConfigUpdate::ServiceTier {
++            provider_id: config.model_provider_id.clone(),
++            service_tier: config.service_tier.clone(),
++        });
+         // Both resume entry points must restore identities before children can be loaded lazily.
+         if let InitialHistory::Resumed(resumed) = &initial_history
+             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
+diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
+index e7da4dd829ea40069f659d3b31340e573382f605..f4a6fe79ebf93e8893e4b965c3323896ca312925 100644
+--- a/codex-rs/core/tests/suite/agent_control_tests.rs
++++ b/codex-rs/core/tests/suite/agent_control_tests.rs
+@@ -86,7 +86,7 @@ impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config>
+ 
+ pub(super) struct TestAgentControl {
+     thread_id: ThreadId,
+-    service_tier: Mutex<Option<String>>,
++    service_tier: Mutex<Option<(String, String)>>,
+     mail: Mutex<Vec<PendingAgentMessage>>,
+     mailbox_state: tokio::sync::watch::Sender<bool>,
+     agents: Mutex<HashMap<String, ThreadId>>,
+@@ -213,13 +213,22 @@ impl AgentControl for TestAgentControl {
+         Box::pin(async {})
+     }
+ 
+-    fn service_tier(&self) -> Option<String> {
+-        self.service_tier.lock().expect("service tier lock").clone()
++    fn service_tier(&self, provider_id: &str) -> Option<String> {
++        self.service_tier
++            .lock()
++            .expect("service tier lock")
++            .as_ref()
++            .filter(|(selected_provider, _)| selected_provider == provider_id)
++            .map(|(_, tier)| tier.clone())
+     }
+ 
+     fn propagate_config_update(&self, update: AgentConfigUpdate) {
+-        let AgentConfigUpdate::ServiceTier(tier) = update;
+-        *self.service_tier.lock().expect("service tier lock") = tier;
++        let AgentConfigUpdate::ServiceTier {
++            provider_id,
++            service_tier,
++        } = update;
++        *self.service_tier.lock().expect("service tier lock") =
++            service_tier.map(|tier| (provider_id, tier));
+     }
+ 
+     fn get_guardian_package(
+@@ -317,7 +326,10 @@ async fn host_threads_preserve_lineage_settings_and_resume_routing() -> anyhow::
+         ),
+         (controller.identity(), Some(root_id))
+     );
+-    assert_eq!(controller.service_tier(), Some("priority".to_string()));
++    assert_eq!(
++        controller.service_tier(&test.config.model_provider_id),
++        Some("priority".to_string())
++    );
+     let message = codex_protocol::protocol::InterAgentCommunication::new(
+         AgentPath::root(),
+         AgentPath::root().join("worker").expect("valid child path"),
+@@ -419,7 +431,10 @@ async fn host_threads_preserve_lineage_settings_and_resume_routing() -> anyhow::
+                 "{error:?}"
+             );
+         }
+-        assert_eq!(controller.service_tier(), Some("priority".to_string()));
++        assert_eq!(
++            controller.service_tier(&test.config.model_provider_id),
++            Some("priority".to_string())
++        );
+     }
+     child.thread.shutdown_and_wait().await?;
+     test.thread_manager.remove_thread(&child.thread_id).await;

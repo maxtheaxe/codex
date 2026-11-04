@@ -1,0 +1,271 @@
+From a6179d3908555b59b80028e59b82c7fbc664defc Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 08:48:36 +0000
+Subject: [PATCH] Use host model catalogs when preparing cross-provider agents
+
+
+diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
+index 65a047e5813296c209583a0b313d886e2fa3991d..1fb08bd530b6e8e7db89d1bcbd358d2b8ab6ef4a 100644
+--- a/codex-rs/core/src/agent/child_config.rs
++++ b/codex-rs/core/src/agent/child_config.rs
+@@ -79,7 +79,8 @@ pub(crate) async fn prepare_agent_spawn_config(
+     } else {
+         false
+     };
+-    let models_manager = spawn_models_manager(session, &config, provider_switched);
++    let models_manager =
++        spawn_models_manager(session, &config, provider_switched, &turn.originator);
+     apply_requested_spawn_agent_model_overrides(
+         step_context,
+         &mut config,
+@@ -181,18 +182,33 @@ fn spawn_models_manager(
+     session: &Session,
+     config: &Config,
+     provider_switched: bool,
++    originator: &str,
+ ) -> SharedModelsManager {
+     if !provider_switched {
+         return Arc::clone(&session.services.models_manager);
+     }
+     let credentials = Arc::clone(&session.services.auth_manager);
++    if let Some(manager) = session
++        .services
++        .local_agent_runtime
++        .models_manager_for_thread(
++            config,
++            Arc::clone(&credentials),
++            &session.services.runtime_auth,
++            originator,
++        )
++    {
++        return manager;
++    }
++    // Detached test sessions have no host catalog factory to consult.
+     let runtime = crate::runtime_auth::runtime_for_config(
+         &session.services.runtime_auth,
+         config,
+         Arc::clone(&credentials),
+         &session.installation_id,
+     );
+-    crate::thread_manager::build_models_manager(config, credentials, runtime)
++    let manager = crate::thread_manager::build_models_manager(config, credentials, runtime);
++    manager.for_originator(originator).unwrap_or(manager)
+ }
+ 
+ /// Builds the base config snapshot for a newly spawned sub-agent.
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index 08a8ad2efcb22126912d0f95d4846360bcdb0fd5..fc591ec41f404a88d67002bc69dac8448fc31128 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -6,8 +6,10 @@ use super::execution::AgentExecutionLimiter;
+ use super::residency::V2Residency;
+ use crate::agent::api::AgentControl;
+ use crate::agent::registry::AgentRegistry;
++use crate::config::Config;
+ use crate::config::RolloutBudgetConfig;
+ use crate::rollout_budget::RolloutBudget;
++use crate::runtime_auth::RuntimeAuthSlot;
+ use crate::session::session::Session;
+ use crate::thread_manager::AgentTreeShutdownFailure;
+ use crate::thread_manager::AgentTreeShutdownFailureReason;
+@@ -16,6 +18,8 @@ use crate::thread_manager::ThreadIdGenerator;
+ use crate::thread_manager::ThreadManagerState;
+ use arc_swap::ArcSwapOption;
+ use codex_extension_api::ThreadInstructionsProvider;
++use codex_login::AuthManager;
++use codex_models_manager::manager::SharedModelsManager;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ItemIdGenerator;
+ use codex_protocol::SessionId;
+@@ -244,6 +248,19 @@ impl LocalAgentRuntime {
+             runtime: self.clone(),
+         }
+     }
++
++    /// Use the host's catalog factory while retaining the invoking session's auth owner.
++    pub(crate) fn models_manager_for_thread(
++        &self,
++        config: &Config,
++        credentials: Arc<AuthManager>,
++        runtime_auth: &RuntimeAuthSlot,
++        originator: &str,
++    ) -> Option<SharedModelsManager> {
++        self.manager.upgrade().map(|manager| {
++            manager.models_manager_for_thread(config, credentials, runtime_auth, originator)
++        })
++    }
+ }
+ 
+ /// Local construction binds identity after reading history. Hosts and internal children
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index c11fda446e92feb84cd0e393faf9161f2479d1b0..98a39de42c8622b462798cbd172fd087fc108297 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1803,6 +1803,27 @@ impl ThreadManager {
+ }
+ 
+ impl ThreadManagerState {
++    /// Resolve a thread's catalog using its credential owner and the host's catalog policy.
++    pub(crate) fn models_manager_for_thread(
++        &self,
++        config: &Config,
++        credentials: Arc<AuthManager>,
++        runtime_auth: &crate::runtime_auth::RuntimeAuthSlot,
++        originator: &str,
++    ) -> SharedModelsManager {
++        let runtime = crate::runtime_auth::runtime_for_config(
++            runtime_auth,
++            config,
++            Arc::clone(&credentials),
++            &self.installation_id,
++        );
++        let same_owner = Arc::ptr_eq(&credentials, &self.auth_manager);
++        let manager = self
++            .model_catalog
++            .for_thread(config, credentials, runtime, same_owner);
++        manager.for_originator(originator).unwrap_or(manager)
++    }
++
+     pub(crate) fn shared_thread_instructions_provider(
+         &self,
+         root_thread_id: ThreadId,
+@@ -2592,21 +2613,12 @@ impl ThreadManagerState {
+                 .map(|parent| Arc::clone(&parent.session.services.runtime_auth))
+                 .unwrap_or_default()
+         };
+-        let runtime = crate::runtime_auth::runtime_for_config(
+-            &runtime_auth,
++        let models_manager = self.models_manager_for_thread(
+             &config,
+             Arc::clone(&auth_manager),
+-            &self.installation_id,
+-        );
+-        let manager = self.model_catalog.for_thread(
+-            &config,
+-            Arc::clone(&auth_manager),
+-            runtime,
+-            Arc::ptr_eq(&auth_manager, &self.auth_manager),
++            &runtime_auth,
++            &startup_context.originator,
+         );
+-        let models_manager = manager
+-            .for_originator(&startup_context.originator)
+-            .unwrap_or(manager);
+         let spawn_result = Session::spawn(SessionSpawnArgs {
+             attached_thread,
+             startup,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index ffb2463c006da174081f13dd6896eda351c10910..05405bb46dc13c6bb0a9e6155e7b07b799ba5baa 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -3312,6 +3312,110 @@ async fn new_uses_active_provider_for_model_refresh() {
+     ));
+ }
+ 
++#[tokio::test]
++async fn cross_provider_spawn_uses_host_catalog_and_session_credentials() {
++    use crate::agent::child_config::SpawnConfigOptions;
++    use crate::agent::child_config::SpawnConfigVersion;
++    use crate::agent::child_config::prepare_agent_spawn_config;
++    use codex_model_provider::ModelCatalogFactory;
++    use codex_model_provider::ProviderAuthContext;
++    use codex_model_provider::SharedModelProvider;
++    use codex_models_manager::manager::StaticModelsManager;
++    use codex_protocol::openai_models::ModelOrigin;
++    use codex_protocol::openai_models::ReasoningEffort;
++    use codex_protocol::openai_models::ReasoningEffortPreset;
++
++    #[derive(Default)]
++    struct HostCatalog {
++        providers: std::sync::Mutex<Vec<SharedModelProvider>>,
++    }
++
++    impl ModelCatalogFactory for HostCatalog {
++        fn build(
++            &self,
++            provider: SharedModelProvider,
++            _config_model_catalog: Option<ModelsResponse>,
++            _api_key_model_discovery_default: bool,
++        ) -> SharedModelsManager {
++            let mut model = codex_models_manager::model_info::model_info_from_slug("host/model");
++            model.default_reasoning_level = Some(ReasoningEffort::Low);
++            model.supported_reasoning_levels = vec![ReasoningEffortPreset {
++                effort: ReasoningEffort::Low,
++                description: "Host-supported effort".to_string(),
++            }];
++            let catalog = Arc::new(StaticModelsManager::new(
++                provider.auth_manager(),
++                ModelsResponse {
++                    models: vec![model],
++                },
++                ModelOrigin::ExplicitConfig,
++            ));
++            self.providers.lock().unwrap().push(provider);
++            catalog
++        }
++    }
++
++    let (_home, config, mut manager) = startup_fixture().await;
++    let factory = Arc::new(HostCatalog::default());
++    let root_credentials = manager.auth_manager();
++    Arc::get_mut(&mut manager.state)
++        .expect("unshared manager")
++        .model_catalog = model_catalog::ThreadModelCatalog::new(
++        config.model_provider.clone(),
++        None,
++        factory.clone(),
++        false,
++        ProviderAuthContext {
++            credentials: Arc::clone(&root_credentials),
++            runtime_auth: None,
++        },
++    );
++
++    for credentials in [
++        root_credentials,
++        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("session-owner")),
++    ] {
++        let (mut session, mut turn) = make_session_and_context().await;
++        session.services.auth_manager = Arc::clone(&credentials);
++        session.services.local_agent_runtime = manager.agent_control().runtime;
++        let mut child_config = (*turn.config).clone();
++        let mut target = child_config.model_providers["ollama"].clone();
++        target.name = "Host target".to_string();
++        child_config
++            .model_providers
++            .insert("target".to_string(), target);
++        turn.config = Arc::new(child_config);
++        let step = StepContext::for_test(Arc::new(turn));
++        let prepared = prepare_agent_spawn_config(
++            &session,
++            &step,
++            SpawnConfigOptions {
++                version: SpawnConfigVersion::V2,
++                full_history_fork: false,
++                role_name: None,
++                model: Some("host/model"),
++                model_provider: Some("target"),
++                reasoning_effort: None,
++            },
++        )
++        .await
++        .expect("prepare child with host catalog");
++        assert_eq!(
++            prepared.config.model_reasoning_effort,
++            Some(ReasoningEffort::Low)
++        );
++        let providers = factory.providers.lock().unwrap();
++        let selected = providers
++            .last()
++            .expect("host factory received target provider");
++        assert_eq!(selected.info().name, "Host target");
++        assert!(Arc::ptr_eq(
++            &selected.auth_manager().expect("provider credential owner"),
++            &credentials,
++        ));
++    }
++}
++
+ #[tokio::test]
+ async fn startup_catalog_cache_policy_controls_refresh() {
+     let server = MockServer::start().await;

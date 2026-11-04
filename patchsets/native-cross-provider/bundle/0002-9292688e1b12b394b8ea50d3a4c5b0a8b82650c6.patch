@@ -1,0 +1,161 @@
+From 9292688e1b12b394b8ea50d3a4c5b0a8b82650c6 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 08:35:09 +0000
+Subject: [PATCH] fix(core): retain child provider and model across cold resume
+
+
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index e557f814c96daa3cacb67d0ff82b9879e5a03312..87f572f4bd6db7c059f5af46ae9cf3faa0472d47 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -5,6 +5,7 @@ use super::spawn_telemetry::SpawnMeasurements;
+ use super::spawn_telemetry::record_spawn_success;
+ use super::*;
+ use crate::agent::child_config::build_agent_resume_config;
++use crate::agent::child_config::select_agent_model_provider;
+ use crate::agent::history::load_agent_model_context;
+ use crate::agent::history::prepare_forked_history;
+ use crate::agent::role::apply_role_to_config;
+@@ -347,7 +348,7 @@ impl LocalAgentControl {
+         } else {
+             None
+         };
+-        config.model_reasoning_effort = stored_reasoning_effort;
++        config.model_reasoning_effort = stored_reasoning_effort.clone();
+         if let Some(role_name) = session_source.get_agent_role() {
+             let runtime_approval_policy = config.permissions.approval_policy.value();
+             let runtime_approvals_reviewer = config.approvals_reviewer;
+@@ -388,18 +389,9 @@ impl LocalAgentControl {
+         if let Some(model) = stored_model {
+             config.model = Some(model);
+         }
+-        if config.model_provider_id != stored_model_provider {
+-            config.model_provider = config
+-                .model_providers
+-                .get(&stored_model_provider)
+-                .cloned()
+-                .ok_or_else(|| {
+-                    CodexErr::InvalidRequest(format!(
+-                        "Model provider `{stored_model_provider}` not found"
+-                    ))
+-                })?;
+-            config.model_provider_id = stored_model_provider;
+-        }
++        select_agent_model_provider(&mut config, &stored_model_provider)
++            .map_err(CodexErr::InvalidRequest)?;
++        config.model_reasoning_effort = stored_reasoning_effort;
+         let parent_thread_id = owner_thread_id
+             .or_else(|| initial_history.get_resumed_parent_thread_id())
+             .or(stored_parent_thread_id);
+@@ -1008,7 +1000,7 @@ impl LocalAgentControl {
+ 
+     async fn resume_single_agent_from_rollout(
+         &self,
+-        config: Config,
++        mut config: Config,
+         thread_id: ThreadId,
+         session_source: SessionSource,
+     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
+@@ -1020,6 +1012,15 @@ impl LocalAgentControl {
+                 include_history: false,
+             })
+             .await?;
++        // A resumed child keeps its own provider/model even when the caller uses a
++        // different provider. Resolve credentials through the current registry and
++        // recheck managed provider requirements before replaying saved context.
++        select_agent_model_provider(&mut config, &stored_thread.model_provider)
++            .map_err(CodexErr::InvalidRequest)?;
++        if let Some(model) = stored_thread.model.clone() {
++            config.model = Some(model);
++        }
++        config.model_reasoning_effort = stored_thread.reasoning_effort.clone();
+         let resumed_agent_path = stored_thread
+             .agent_path
+             .as_deref()
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index c8662e89a04e10f12b35731fb0ffaafebe8fc988..c98f36bdcda2ea06f54ac3291b4dc80005ba5cbe 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -5245,6 +5245,82 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+         .expect("resumed child shutdown should succeed");
+ }
+ 
++#[test_case::test_case("openai", "openrouter"; "openai_parent_openrouter_child")]
++#[test_case::test_case("openrouter", "openai"; "openrouter_parent_openai_child")]
++#[tokio::test]
++async fn resume_agent_from_rollout_preserves_child_provider(
++    parent_provider: &str,
++    child_provider: &str,
++) {
++    let (home, mut config) = test_config().await;
++    let mut openrouter = config.model_providers["ollama"].clone();
++    openrouter.name = "OpenRouter test provider".to_string();
++    config
++        .model_providers
++        .insert("openrouter".to_string(), openrouter);
++    config.model_provider_id = parent_provider.to_string();
++    config.model_provider = config.model_providers[parent_provider].clone();
++    config.model_context_window = Some(8_000);
++    config.model_auto_compact_token_limit = Some(4_000);
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let mut child_config = harness.config.clone();
++    crate::agent::child_config::select_agent_model_provider(&mut child_config, child_provider)
++        .expect("select the child provider");
++    child_config.model = Some("gpt-5.6-sol".to_string());
++    child_config.model_reasoning_effort = Some(ReasoningEffort::High);
++    let child_id = harness
++        .control
++        .spawn_agent(
++            child_config,
++            text_input("child task"),
++            /*session_source*/ None,
++        )
++        .await
++        .expect("spawn child");
++    let child = harness
++        .manager
++        .get_thread(child_id)
++        .await
++        .expect("child exists");
++    persist_thread_for_tree_resume(&child, "cross-provider saved context").await;
++    harness
++        .control
++        .shutdown_live_agent(child_id)
++        .await
++        .expect("shut down child");
++
++    harness
++        .control
++        .resume_agent_from_rollout(harness.config.clone(), child_id, SessionSource::Exec)
++        .await
++        .expect("resume through a caller using another provider");
++    let resumed = harness
++        .manager
++        .get_thread(child_id)
++        .await
++        .expect("resumed child exists");
++    let snapshot = resumed.config_snapshot().await;
++    assert_eq!(snapshot.model_provider_id, child_provider);
++    assert_eq!(snapshot.model, "gpt-5.6-sol");
++    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
++    let resumed_config = resumed.session.get_config().await;
++    assert_eq!(
++        resumed_config.model_provider,
++        harness.config.model_providers[child_provider]
++    );
++    assert_eq!(resumed_config.model_context_window, None);
++    assert_eq!(resumed_config.model_auto_compact_token_limit, None);
++    assert!(history_contains_text(
++        resumed.session.clone_history().await.raw_items(),
++        "cross-provider saved context",
++    ));
++    harness
++        .control
++        .shutdown_live_agent(child_id)
++        .await
++        .expect("shut down resumed child");
++}
++
+ #[test_case::test_case(vec!["child-plugin".to_string()]; "saved disabled plugin")]
+ #[test_case::test_case(Vec::new(); "saved empty selection")]
+ #[tokio::test]
