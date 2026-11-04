@@ -22,6 +22,8 @@ const ROOT_PROMPT: &str = "start the provider routing worker";
 const CHILD_PROMPT: &str = "do the provider routing work";
 const ROOT_MODEL: &str = "gpt-5.5";
 const CHILD_MODEL: &str = "gpt-5.6-sol";
+const CUSTOM_ROOT_MODEL: &str = "vendor/parent-model";
+const CUSTOM_CHILD_MODEL: &str = "vendor/test-model";
 
 fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     let body = match request
@@ -75,9 +77,19 @@ async fn spawn_routes_child_to_selected_provider(
     let openrouter_url = openrouter.uri();
     let openai_url = openai.uri();
     let root_provider_owned = root_provider.to_string();
+    let root_model = if root_provider == "openai" {
+        ROOT_MODEL
+    } else {
+        CUSTOM_ROOT_MODEL
+    };
+    let child_model = match selected {
+        Some("openai") => CHILD_MODEL,
+        Some(_) => CUSTOM_CHILD_MODEL,
+        None => root_model,
+    };
     let mut builder = test_codex()
         .with_auth(CodexAuth::from_api_key("openai-test-key"))
-        .with_model(ROOT_MODEL)
+        .with_model(root_model)
         .with_pre_build_hook(move |home| {
             std::fs::write(home.join("config.toml"), format!(
                 "[model_providers.openrouter]\nname = 'OpenRouter'\nbase_url = '{openrouter_url}/v1'\nexperimental_bearer_token = 'openrouter-test-key'\nwire_api = 'responses'\nrequest_max_retries = 0\nstream_max_retries = 0\n"
@@ -87,9 +99,10 @@ async fn spawn_routes_child_to_selected_provider(
     let test = builder.build_with_auto_env(root_server).await?;
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
-    let mut args = json!({"message": CHILD_PROMPT, "task_name": "worker", "model": CHILD_MODEL, "fork_turns": "none"});
+    let mut args = json!({"message": CHILD_PROMPT, "task_name": "worker", "fork_turns": "none"});
     if let Some(provider) = selected {
         args["model_provider"] = json!(provider);
+        args["model"] = json!(child_model);
     }
     let root_request = mount_sse_once_match(
         root_server,
@@ -146,8 +159,8 @@ async fn spawn_routes_child_to_selected_provider(
     .await?;
     let root = root_request.single_request();
     let child_http = child_request.single_request();
-    assert_eq!(root.body_json()["model"], ROOT_MODEL);
-    assert_eq!(child_http.body_json()["model"], CHILD_MODEL);
+    assert_eq!(root.body_json()["model"], root_model);
+    assert_eq!(child_http.body_json()["model"], child_model);
     let expected_auth = |provider| {
         if provider == "openai" {
             "Bearer openai-test-key"
@@ -287,7 +300,7 @@ async fn spawn_routes_child_to_selected_provider(
         Some(expected_auth(root_provider))
     );
     let continued = child_followup.single_request();
-    assert_eq!(continued.body_json()["model"], CHILD_MODEL);
+    assert_eq!(continued.body_json()["model"], child_model);
     assert!(
         continued
             .body_json()
@@ -382,6 +395,294 @@ async fn unknown_provider_is_reported_to_the_calling_agent() -> Result<()> {
         created_threads.try_recv().is_err(),
         "invalid provider must not spawn a child"
     );
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[test_case("openai", "openrouter"; "openai_to_openrouter")]
+#[test_case("openrouter", "openai"; "openrouter_to_openai")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_spawn_routes_to_selected_provider(
+    root_provider: &str,
+    child_provider: &str,
+) -> Result<()> {
+    let openai = start_mock_server().await;
+    let openrouter = start_mock_server().await;
+    let root_server = if root_provider == "openai" {
+        &openai
+    } else {
+        &openrouter
+    };
+    let child_server = if child_provider == "openai" {
+        &openai
+    } else {
+        &openrouter
+    };
+    let root_model = if root_provider == "openai" {
+        ROOT_MODEL
+    } else {
+        CUSTOM_ROOT_MODEL
+    };
+    let child_model = if child_provider == "openai" {
+        CHILD_MODEL
+    } else {
+        CUSTOM_CHILD_MODEL
+    };
+    let root_provider_owned = root_provider.to_string();
+    let openai_url = openai.uri();
+    let openrouter_url = openrouter.uri();
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("openai-test-key"))
+        .with_model(root_model)
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), format!(
+                "[model_providers.openrouter]\nname = 'OpenRouter'\nbase_url = '{openrouter_url}/v1'\nexperimental_bearer_token = 'openrouter-test-key'\nwire_api = 'responses'\nrequest_max_retries = 0\nstream_max_retries = 0\n"
+            )).unwrap();
+        })
+        .with_config(move |config| {
+            configure(config, &root_provider_owned, &openai_url);
+            config.features.disable(Feature::MultiAgentV2).unwrap();
+        });
+    let test = builder.build_with_auto_env(root_server).await?;
+    let mut created = test.thread_manager.subscribe_thread_created();
+    let root_request = mount_sse_once_match(root_server,
+        |request: &wiremock::Request| body_contains(request, "start legacy provider worker") && !body_contains(request, "legacy-provider-spawn"),
+        sse(vec![ev_response_created("legacy-spawn"), ev_function_call_with_namespace("legacy-provider-spawn", "multi_agent_v1", "spawn_agent", &json!({"message": "legacy provider work", "model_provider": child_provider, "model": child_model, "fork_context": false}).to_string()), ev_completed("legacy-spawn")])).await;
+    let child_request = mount_sse_once_match(
+        child_server,
+        |request: &wiremock::Request| {
+            body_contains(request, "legacy provider work")
+                && !body_contains(request, "start legacy provider worker")
+        },
+        sse(vec![
+            ev_response_created("legacy-child"),
+            ev_assistant_message("legacy-child-answer", "legacy child finished"),
+            ev_completed("legacy-child"),
+        ]),
+    )
+    .await;
+    let root_completion = mount_sse_once_match(
+        root_server,
+        |request: &wiremock::Request| body_contains(request, "legacy-provider-spawn"),
+        sse(vec![
+            ev_response_created("legacy-done"),
+            ev_assistant_message("legacy-answer", "legacy worker started"),
+            ev_completed("legacy-done"),
+        ]),
+    )
+    .await;
+    test.submit_text_turn("start legacy provider worker")
+        .await?;
+    let child_id =
+        tokio::time::timeout(std::time::Duration::from_secs(10), created.recv()).await??;
+    let child = test.thread_manager.get_thread(child_id).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_event(child.as_ref(), |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await?;
+    let expected_auth = |provider| {
+        if provider == "openai" {
+            "Bearer openai-test-key"
+        } else {
+            "Bearer openrouter-test-key"
+        }
+    };
+    let root = root_request.single_request();
+    let child_http = child_request.single_request();
+    assert_eq!(root.body_json()["model"], root_model);
+    assert_eq!(child_http.body_json()["model"], child_model);
+    assert_eq!(
+        root.header("authorization").as_deref(),
+        Some(expected_auth(root_provider))
+    );
+    assert_eq!(
+        child_http.header("authorization").as_deref(),
+        Some(expected_auth(child_provider))
+    );
+    let spawn_output: serde_json::Value = serde_json::from_str(
+        &root_completion
+            .single_request()
+            .function_call_output_text("legacy-provider-spawn")
+            .expect("spawn output"),
+    )?;
+    assert_eq!(spawn_output["agent_id"], child_id.to_string());
+    child.shutdown_and_wait().await?;
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn switched_child_can_be_interrupted_while_active_and_continued() -> Result<()> {
+    use core_test_support::wait_for_event_match;
+    let openai = start_mock_server().await;
+    let openrouter = start_mock_server().await;
+    let openai_url = openai.uri();
+    let openrouter_url = openrouter.uri();
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("openai-test-key"))
+        .with_model(ROOT_MODEL)
+        .with_pre_build_hook(move |home| {
+            std::fs::write(home.join("config.toml"), format!(
+                "[model_providers.openrouter]\nname = 'OpenRouter'\nbase_url = '{openrouter_url}/v1'\nexperimental_bearer_token = 'openrouter-test-key'\nwire_api = 'responses'\nrequest_max_retries = 0\nstream_max_retries = 0\n"
+            )).unwrap();
+        })
+        .with_config(move |config| configure(config, "openai", &openai_url));
+    let test = builder.build_with_auto_env(&openai).await?;
+    let mut created = test.thread_manager.subscribe_thread_created();
+    mount_sse_once_match(&openai,
+        |request: &wiremock::Request| body_contains(request, "start active routing worker") && !body_contains(request, "active-spawn"),
+        sse(vec![ev_response_created("active-root"), ev_function_call_with_namespace("active-spawn", "collaboration", "spawn_agent", &json!({"message": "pause active routing worker", "task_name": "worker", "model_provider": "openrouter", "model": CUSTOM_CHILD_MODEL, "fork_turns": "none"}).to_string()), ev_completed("active-root")])).await;
+    mount_sse_once_match(
+        &openai,
+        |request: &wiremock::Request| {
+            body_contains(request, "active-spawn") && !body_contains(request, "active-interrupt")
+        },
+        sse(vec![
+            ev_response_created("active-root-done"),
+            ev_assistant_message("active-root-answer", "worker started"),
+            ev_completed("active-root-done"),
+        ]),
+    )
+    .await;
+    let first_child = mount_sse_once_match(
+        &openrouter,
+        |request: &wiremock::Request| {
+            body_contains(request, "pause active routing worker")
+                && !body_contains(request, "active-child-wait")
+        },
+        sse(vec![
+            ev_response_created("active-child"),
+            ev_function_call_with_namespace(
+                "active-child-wait",
+                "collaboration",
+                "wait_agent",
+                &json!({"timeout_ms": 30000}).to_string(),
+            ),
+            ev_completed("active-child"),
+        ]),
+    )
+    .await;
+    test.submit_text_turn("start active routing worker").await?;
+    let child_id =
+        tokio::time::timeout(std::time::Duration::from_secs(10), created.recv()).await??;
+    let child = test.thread_manager.get_thread(child_id).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_event_match(child.as_ref(), |event| match event {
+            EventMsg::CollabWaitingBegin(wait) if wait.call_id == "active-child-wait" => Some(()),
+            EventMsg::Error(error) => panic!("child failed before wait: {}", error.message),
+            EventMsg::TurnComplete(_) => panic!("child completed before interruption"),
+            _ => None,
+        }),
+    )
+    .await?;
+    assert_eq!(
+        first_child
+            .single_request()
+            .header("authorization")
+            .as_deref(),
+        Some("Bearer openrouter-test-key")
+    );
+    mount_sse_once_match(
+        &openai,
+        |request: &wiremock::Request| {
+            body_contains(request, "stop active routing worker")
+                && !body_contains(request, "active-interrupt")
+        },
+        sse(vec![
+            ev_response_created("stop-root"),
+            ev_function_call_with_namespace(
+                "active-interrupt",
+                "collaboration",
+                "interrupt_agent",
+                &json!({"target": "worker"}).to_string(),
+            ),
+            ev_completed("stop-root"),
+        ]),
+    )
+    .await;
+    let interrupted = mount_sse_once_match(
+        &openai,
+        |request: &wiremock::Request| body_contains(request, "active-interrupt"),
+        sse(vec![
+            ev_response_created("stop-root-done"),
+            ev_assistant_message("stop-root-answer", "worker stopped"),
+            ev_completed("stop-root-done"),
+        ]),
+    )
+    .await;
+    test.submit_text_turn("stop active routing worker").await?;
+    let interrupt: serde_json::Value = serde_json::from_str(
+        &interrupted
+            .single_request()
+            .function_call_output_text("active-interrupt")
+            .expect("interrupt output"),
+    )?;
+    assert_eq!(interrupt["previous_status"], "running");
+    mount_sse_once_match(
+        &openai,
+        |request: &wiremock::Request| {
+            body_contains(request, "resume active routing worker")
+                && !body_contains(request, "active-resume")
+        },
+        sse(vec![
+            ev_response_created("resume-root"),
+            ev_function_call_with_namespace(
+                "active-resume",
+                "collaboration",
+                "followup_task",
+                &json!({"target": "worker", "message": "finish after interruption"}).to_string(),
+            ),
+            ev_completed("resume-root"),
+        ]),
+    )
+    .await;
+    let resume_result = mount_sse_once_match(
+        &openai,
+        |request: &wiremock::Request| body_contains(request, "active-resume"),
+        sse(vec![
+            ev_response_created("resume-root-done"),
+            ev_assistant_message("resume-root-answer", "worker resumed"),
+            ev_completed("resume-root-done"),
+        ]),
+    )
+    .await;
+    let resumed_child = mount_sse_once_match(
+        &openrouter,
+        |request: &wiremock::Request| body_contains(request, "finish after interruption"),
+        sse(vec![
+            ev_response_created("resume-child"),
+            ev_assistant_message("resume-child-answer", "resumed child finished"),
+            ev_completed("resume-child"),
+        ]),
+    )
+    .await;
+    test.submit_text_turn("resume active routing worker")
+        .await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        wait_for_event(child.as_ref(), |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        }),
+    )
+    .await?;
+    assert_eq!(
+        resume_result
+            .single_request()
+            .function_call_output_text("active-resume")
+            .as_deref(),
+        Some("")
+    );
+    let resumed = resumed_child.single_request();
+    assert_eq!(resumed.body_json()["model"], CUSTOM_CHILD_MODEL);
+    assert_eq!(
+        resumed.header("authorization").as_deref(),
+        Some("Bearer openrouter-test-key")
+    );
+    child.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
     Ok(())
 }
