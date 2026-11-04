@@ -552,6 +552,8 @@ async fn fresh_hosted_child_persists_inherited_session_id() -> anyhow::Result<()
     let options = || StartThreadOptions {
         session_source: Some(SessionSource::Custom("host".to_string())),
         environments: Some(vec![root.executor_environment().request()]),
+        // This test reloads the persisted rollout through the legacy history API.
+        history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Legacy),
         ..StartThreadOptions::new(root.config.clone())
     };
     let mut child_options = options();
