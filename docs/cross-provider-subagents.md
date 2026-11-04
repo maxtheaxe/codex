@@ -259,6 +259,7 @@ python3 -m unittest discover -s scripts -p test_cross_provider_patchset.py -v
 
 cd codex-rs
 cargo fmt --all -- --check
+export RUST_MIN_STACK=16777216
 cargo test -p codex-core --lib multi_agents
 cargo test -p codex-core --lib resume_agent_from_rollout_preserves_child_provider
 cargo test -p codex-core --test all subagent_provider_routing
