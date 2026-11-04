@@ -1,0 +1,18 @@
+From 5a08b4e286faed616057abf60fe245306ce89047 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 09:09:47 +0000
+Subject: [PATCH] docs: use sufficient stack for native agent test harness
+
+
+diff --git a/docs/cross-provider-subagents.md b/docs/cross-provider-subagents.md
+index 0e2834db31b7fffe4dd0109eb12ac0e03008b059..895d9438f321af8968d410227fbfd5c62c12aad1 100644
+--- a/docs/cross-provider-subagents.md
++++ b/docs/cross-provider-subagents.md
+@@ -259,6 +259,7 @@ python3 -m unittest discover -s scripts -p test_cross_provider_patchset.py -v
+ 
+ cd codex-rs
+ cargo fmt --all -- --check
++export RUST_MIN_STACK=16777216
+ cargo test -p codex-core --lib multi_agents
+ cargo test -p codex-core --lib resume_agent_from_rollout_preserves_child_provider
+ cargo test -p codex-core --test all subagent_provider_routing

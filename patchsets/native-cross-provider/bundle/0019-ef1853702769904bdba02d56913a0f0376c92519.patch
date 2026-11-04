@@ -1,0 +1,67 @@
+From ef1853702769904bdba02d56913a0f0376c92519 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 09:04:14 +0000
+Subject: [PATCH] Reject filtered disabled models in subagent fallback
+
+
+diff --git a/codex-rs/core/src/agent/child_config.rs b/codex-rs/core/src/agent/child_config.rs
+index eb6dd9fc54506f7e3a8dea28f4b2c6de39872b87..ed6af217e59de40099d1659734fdc3bdd329f067 100644
+--- a/codex-rs/core/src/agent/child_config.rs
++++ b/codex-rs/core/src/agent/child_config.rs
+@@ -362,6 +362,16 @@ async fn apply_requested_spawn_agent_model_overrides(
+             .get_model_info(&selected_model_name, &config.to_models_manager_config())
+             .await;
+ 
++        // The picker list is filtered by auth, but the model metadata comes from the
++        // full catalog. A filtered-out disabled model is not an unknown custom model.
++        if turn.multi_agent_version == MultiAgentVersion::V2
++            && selected_model_info.multi_agent_version == Some(MultiAgentVersion::Disabled)
++        {
++            return Err(format!(
++                "Model `{selected_model_name}` does not support the MultiAgentV2 backend for spawn_agent."
++            ));
++        }
++
+         config.model = Some(selected_model_name.clone());
+         if let Some(reasoning_effort) = requested_reasoning_effort {
+             if selected_model_info.origin != ModelOrigin::Synthetic {
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 818c6b70dd151f60883915aeb848f7765da28dff..cfedc26b42446334b923ed7278f2852f842d43a6 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -4911,7 +4911,10 @@ async fn explicit_custom_provider_accepts_unknown_model_but_rejects_disabled_mod
+     disabled.slug = "vendor/disabled".to_string();
+     disabled.supported_in_api = true;
+     disabled.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::Disabled);
+-    catalog.models = vec![disabled];
++    let mut filtered_disabled = disabled.clone();
++    filtered_disabled.slug = "vendor/filtered-disabled".to_string();
++    filtered_disabled.supported_in_api = false;
++    catalog.models = vec![disabled, filtered_disabled];
+     session.services.models_manager = Arc::new(StaticModelsManager::new(
+         None,
+         catalog,
+@@ -4949,4 +4952,23 @@ async fn explicit_custom_provider_accepts_unknown_model_but_rejects_disabled_mod
+     .err()
+     .expect("disabled catalog model must not use unknown-model fallback");
+     assert!(err.contains("Unknown model"), "{err}");
++    let err = prepare_agent_spawn_config(
++        &session,
++        &step,
++        SpawnConfigOptions {
++            version: SpawnConfigVersion::V2,
++            full_history_fork: false,
++            role_name: None,
++            model: Some("vendor/filtered-disabled"),
++            model_provider: Some("ollama"),
++            reasoning_effort: None,
++        },
++    )
++    .await
++    .err()
++    .expect("a disabled catalog model filtered from the picker must be rejected");
++    assert!(
++        err.contains("does not support the MultiAgentV2 backend"),
++        "{err}"
++    );
+ }

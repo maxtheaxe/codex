@@ -1,0 +1,19 @@
+From 7df6c9975a024e83f7791183c32350116a108ee3 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 09:17:50 +0000
+Subject: [PATCH] Use legacy history in hosted child persistence fixture
+
+
+diff --git a/codex-rs/core/tests/suite/agent_control_tests.rs b/codex-rs/core/tests/suite/agent_control_tests.rs
+index f4a6fe79ebf93e8893e4b965c3323896ca312925..d0c3c3392ce8f6c93c9329e0d1e7810f6706bf6a 100644
+--- a/codex-rs/core/tests/suite/agent_control_tests.rs
++++ b/codex-rs/core/tests/suite/agent_control_tests.rs
+@@ -552,6 +552,8 @@ async fn fresh_hosted_child_persists_inherited_session_id() -> anyhow::Result<()
+     let options = || StartThreadOptions {
+         session_source: Some(SessionSource::Custom("host".to_string())),
+         environments: Some(vec![root.executor_environment().request()]),
++        // This test reloads the persisted rollout through the legacy history API.
++        history_mode: Some(codex_protocol::protocol::ThreadHistoryMode::Legacy),
+         ..StartThreadOptions::new(root.config.clone())
+     };
+     let mut child_options = options();

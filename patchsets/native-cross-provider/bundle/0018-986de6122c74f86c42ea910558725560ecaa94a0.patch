@@ -1,0 +1,25 @@
+From 986de6122c74f86c42ea910558725560ecaa94a0 Mon Sep 17 00:00:00 2001
+From: Max Perrello <max.perrello@gmail.com>
+Date: Wed, 4 Nov 2026 09:01:48 +0000
+Subject: [PATCH] docs: record pinned V8 prerequisites for verification
+
+
+diff --git a/docs/cross-provider-subagents.md b/docs/cross-provider-subagents.md
+index 7b720149c565d2da41eeacc09af61f1ce3e15953..0e2834db31b7fffe4dd0109eb12ac0e03008b059 100644
+--- a/docs/cross-provider-subagents.md
++++ b/docs/cross-provider-subagents.md
+@@ -242,6 +242,14 @@ continuing to build an unverified tree.
+ 
+ ## Build and verify
+ 
++This upstream snapshot's code-mode runtime uses sandboxed V8. Follow the pinned
++[V8 setup action](../.github/actions/setup-rusty-v8/action.yml) and the trusted
++checksums under `third_party/v8/` to obtain the matching archive and Rust bindings.
++Set `RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` to those verified local files
++before running Cargo. The ordinary upstream V8 release URL does not provide the
++sandbox variant required by this snapshot. A cold Cargo build also fetches large
++V8 submodules; allow time and disk space for those existing dependencies.
++
+ Run from the feature checkout or the successfully verified target. These commands
+ describe the required checks, not a claim that a local machine has completed all
+ of them:
