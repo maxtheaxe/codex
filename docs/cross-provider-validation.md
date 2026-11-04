@@ -1,0 +1,97 @@
+# Cross-provider subagent validation
+
+Validated on November 4, 2026 against base
+`3e743d15787bd9091f674f0fbc27010f0cbcec62` in `maxtheaxe/codex`.
+Implementation and test source through `81c008e3e` passed the checks below;
+later documentation and bundle commits do not change that implementation.
+
+## Results
+
+| Check                                                                                       | Result                                                                                                    |
+| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Core library and test binaries                                                              | Compiled successfully                                                                                     |
+| Existing collaboration and new provider unit tests (`--lib multi_agents`)                   | 91 passed, 1 existing ignored                                                                             |
+| Additional resume, V2 eviction, provider-tier, catalog-owner and catalog-startup unit tests | 11 passed                                                                                                 |
+| New provider routing integration suite                                                      | 8 passed                                                                                                  |
+| Existing service-tier integration suite                                                     | 4 passed                                                                                                  |
+| Existing multi-agent resume integration suite                                               | 2 passed                                                                                                  |
+| Host-controller integration suite                                                           | 8 passed                                                                                                  |
+| Patch helper unit tests                                                                     | 13 passed                                                                                                 |
+| Patch export/apply/verify/rollback                                                          | Complete 17-commit checkpoint reproduced the source tree, then restored the base tree with revert commits |
+| Rust formatting; changed Python formatting/lint; documentation formatting                   | Passed                                                                                                    |
+| Standalone CLI build                                                                        | Passed; `--version` reports `codex-cli 0.0.0`, and `--help` exits successfully                            |
+| Live OpenAI/OpenRouter inference                                                            | Not performed                                                                                             |
+
+There are **124 distinct passing Rust tests**, zero remaining failures in the
+selected suites, and one existing ignored test. The five spawn-schema tests were
+also run separately and passed; they are already included in the collaboration
+count. This is focused verification, not a claim that all repository tests ran.
+
+The ignored Linux test is
+`spawn_agent_reapplies_runtime_sandbox_after_role_config`. Its existing ignore
+annotation states that its sandbox helpers do not work inside the test microVM.
+The remaining compiler warning is an existing unused `EnvironmentAttachment`
+import in `core/src/session/tests.rs`.
+
+The host-controller fixture `fresh_hosted_child_persists_inherited_session_id`
+needed an explicit legacy history mode because it calls a legacy-only history
+reader. The conflicting fixture and rejecting production code were unchanged
+from the base commit. Only the fixture was corrected; a pristine-baseline
+executable comparison was not performed.
+
+## What the integration checks establish
+
+Two independent local Responses servers represent OpenAI and OpenRouter, with
+different bearer credentials and both catalogued and provider-qualified synthetic
+model IDs. The tests verify the actual model, endpoint and authorization header
+of requests, rather than relying on a child's textual self-identification.
+
+Both V1 and V2 parent directions work. V2 coverage also exercises inherited
+provider behavior, native child IDs, status and returned results, messages,
+follow-up tasks, and interruption of an in-flight model request followed by
+continuation. An unknown provider returns an error without creating a child.
+Root `flex` service tiers stay within their provider boundary on initial and
+subsequent child requests. Separate tests cover managed provider requirements,
+full-history rejection, missing models, disabled catalog entries, cold resume,
+eviction and host catalog/credential ownership.
+
+These mocks do not establish live model entitlement or full compatibility of
+every OpenRouter route. The environment had no configured provider credentials
+or permitted provider API destinations, so no live inference was attempted.
+See [configuration and limitations](cross-provider-subagents.md) for Responses
+compatibility, context metadata, role models and reasoning-format constraints.
+
+## Reproduce
+
+Use Rust 1.95.0 and the checksum-verified V8 archive/bindings described in the
+[setup instructions](cross-provider-subagents.md#build-and-verify). The cloud
+verification used four build jobs, no debug information or incremental build,
+and a 16 MiB Rust test-thread stack. Tests had loopback networking enabled; they
+were not bypassed through the network-disabled skip environment.
+
+```bash
+export RUST_MIN_STACK=16777216
+export CARGO_BUILD_JOBS=4
+export CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_INCREMENTAL=0
+
+cd codex-rs
+cargo test -p codex-core --lib multi_agents
+cargo test -p codex-core --lib resume_agent_from_rollout_preserves_child_provider
+cargo test -p codex-core --lib ensure_v2_agent_loaded_preserves_cross_provider_child
+cargo test -p codex-core --lib ensure_v2_agent_loaded_reloads_registered_unloaded_agent
+cargo test -p codex-core --lib v2_reload_preserves_shared_instructions_after_root_unloads
+cargo test -p codex-core --lib shared_tier_follows_provider_and_live_root_updates
+cargo test -p codex-core --lib cross_provider_spawn_uses_host_catalog_and_session_credentials
+cargo test -p codex-core --lib new_uses_active_provider_for_model_refresh
+cargo test -p codex-core --test all subagent_provider_routing
+cargo test -p codex-core --test all subagent_service_tier
+cargo test -p codex-core --test all multi_agent_resume
+cargo test -p codex-core --test all suite::agent_control::
+CARGO_PROFILE_DEV_DEBUG=0 cargo build -p codex-cli --bin codex
+./target/debug/codex --version
+./target/debug/codex --help
+```
+
+The installed `codex-cli 0.166.0-alpha.1` was not replaced or modified. Source
+builds and test artifacts were kept outside the installed application.

@@ -289,8 +289,8 @@ errors, and native lifecycle without spending provider credits. They cannot prov
 that a live account has model entitlement, balance, network access, or complete
 Responses tool compatibility. No live provider inference was performed in the
 development environment because provider credentials and permitted provider
-network access were unavailable. See the final validation report for the actual
-build/test outcomes, including any dependency-download blockers.
+network access were unavailable. See the [validation report](cross-provider-validation.md)
+for the actual build/test outcomes and reproduction commands.
 
 ## Roll back without discarding history
 
