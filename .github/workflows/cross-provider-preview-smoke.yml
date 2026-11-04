@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: cross-provider-preview-smoke-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   released-package:

@@ -6,15 +6,23 @@ Inference is served by a loopback fixture; this does not establish live entitlem
 """
 
 import argparse
+import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import pty
+import re
+import select
 import shutil
 import signal
+import struct
 import subprocess
+import sys
 import tempfile
+import termios
 import threading
+import time
 import tomllib
 
 
@@ -113,6 +121,73 @@ def run(args, env, cwd, *, input=None, success=True, timeout=60):
             f"Command failed ({result.returncode}): {args}\n{stdout[-6000:]}\n{stderr[-6000:]}"
         )
     return result
+
+
+def run_tui(args, env, cwd, expected):
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 180, 0, 0))
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import fcntl, os, sys, termios; "
+            "fcntl.ioctl(0, termios.TIOCSCTTY, 0); "
+            "os.execv(sys.argv[1], sys.argv[1:])",
+            *args,
+        ],
+        env=env,
+        cwd=cwd,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
+        start_new_session=True,
+    )
+    os.close(slave)
+    output = b""
+    kept_existing_model = False
+    deadline = time.monotonic() + 60
+    try:
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 1)[0]:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                output += data
+                if b"\x1b[6n" in data:
+                    os.write(master, b"\x1b[1;1R")
+                clean = re.sub(
+                    r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.decode(errors="replace")
+                )
+                if "Use existing model" in clean and not kept_existing_model:
+                    # Honor the explicit model instead of accepting the bundled
+                    # catalog's upgrade suggestion during first-run onboarding.
+                    # The prompt subscribes to input after drawing its first frame.
+                    time.sleep(0.25)
+                    os.write(master, b"2")
+                    kept_existing_model = True
+                if expected in clean:
+                    return
+            if process.poll() is not None:
+                break
+        raise RuntimeError(
+            "TUI did not display the expected fixture response:\n"
+            + re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", output.decode(errors="replace"))[
+                -5000:
+            ]
+        )
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        os.close(master)
 
 
 def main():
@@ -248,6 +323,25 @@ auth = {{ command = "must-not-execute", args = ["fixture-secret-not-imported"] }
                 root,
             )
             assert "PREVIEW_SMOKE_OK" in routed.stdout, routed.stdout
+            tui = [
+                launcher,
+                "--no-alt-screen",
+                "--sandbox",
+                "read-only",
+                "-c",
+                f'openai_base_url="http://127.0.0.1:{server.server_port}/openai/v1"',
+                "-c",
+                'approval_policy="never"',
+                "-c",
+                "features.code_mode.enabled=false",
+                "-c",
+                f'projects.{json.dumps(str(root))}.trust_level="trusted"',
+            ]
+            # The prompt intentionally omits the expected response marker: merely
+            # echoing user input must not count as a completed model response.
+            prompt = "Return the fixed test acknowledgement. Do not use tools."
+            run_tui([*tui, prompt], env, root, ERROR)
+            run_tui([*tui, "-m", "gpt-5.5", prompt], env, root, "PREVIEW_SMOKE_OK")
             assert (regular / "config.toml").read_text() == config
             assert (
                 regular / "auth.json"
@@ -268,6 +362,7 @@ auth = {{ command = "must-not-execute", args = ["fixture-secret-not-imported"] }
                             "model rejection reproduced",
                             "explicit model request",
                             "custom provider request",
+                            "TUI rejection and explicit model response",
                             "regular state unchanged",
                         ],
                         "requests": server.requests,
