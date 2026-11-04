@@ -1124,12 +1124,19 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 
 #[tokio::test]
 async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
-    check_v2_agent_reload(V2ReloadRoute::Sender).await;
+    check_v2_agent_reload(V2ReloadRoute::Sender, None).await;
 }
 
 #[tokio::test]
 async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
-    check_v2_agent_reload(V2ReloadRoute::NestedParent).await;
+    check_v2_agent_reload(V2ReloadRoute::NestedParent, None).await;
+}
+
+#[test_case::test_case(V2ReloadRoute::Sender; "through_sender")]
+#[test_case::test_case(V2ReloadRoute::NestedParent; "through_parent")]
+#[tokio::test]
+async fn ensure_v2_agent_loaded_preserves_cross_provider_child(route: V2ReloadRoute) {
+    check_v2_agent_reload(route, Some("ollama")).await;
 }
 
 #[tokio::test]
@@ -1299,11 +1306,15 @@ async fn spawn_v2_reload_test_child(
         .expect("spawn_agent should succeed")
 }
 
-async fn check_v2_agent_reload(route: V2ReloadRoute) {
+async fn check_v2_agent_reload(route: V2ReloadRoute, child_provider: Option<&str>) {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
     config.model = Some("gpt-5.6-sol".to_string());
+    if child_provider.is_some() {
+        config.model_context_window = Some(8_000);
+        config.model_auto_compact_token_limit = Some(4_000);
+    }
     config.multi_agent_v2.max_concurrent_threads_per_session = 3;
     config.permissions.allow_login_shell = true;
     config
@@ -1361,7 +1372,12 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     assert!(inherited_instructions.user.is_some());
     assert!(inherited_instructions.thread.is_some());
     let mut child_config = harness.config.clone();
+    if let Some(provider) = child_provider {
+        crate::agent::child_config::select_agent_model_provider(&mut child_config, provider)
+            .expect("select child provider");
+    }
     child_config.model = Some("gpt-5.6-luna".to_string());
+    let expected_provider = child_config.model_provider.clone();
     let spawned_agent =
         spawn_v2_reload_test_child(&control, child_config, &parent_thread, "worker").await;
     let agent_path = spawned_agent
@@ -1417,12 +1433,17 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
     }
 
     let mut sender_config = harness.config.clone();
-    sender_config.model_provider_id = "ollama".to_string();
+    let sender_provider = if child_provider.is_some() {
+        "openai"
+    } else {
+        "ollama"
+    };
+    sender_config.model_provider_id = sender_provider.to_string();
     sender_config.model_provider = sender_config
         .model_providers
-        .get("ollama")
+        .get(sender_provider)
         .cloned()
-        .expect("ollama provider should be configured");
+        .expect("sender provider should be configured");
 
     let mut parent_turn = parent_thread.session.new_default_turn().await;
     let residency_pin = match route {
@@ -1524,12 +1545,14 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
                 .info()
                 .clone(),
         ),
-        (
-            stored_child.model_provider,
-            harness.config.model_provider.clone()
-        ),
+        (stored_child.model_provider, expected_provider),
         "residency reload must preserve the worker provider instead of inheriting its sender's provider",
     );
+    if child_provider.is_some() {
+        let reloaded_config = reloaded_child.session.get_config().await;
+        assert_eq!(reloaded_config.model_context_window, None);
+        assert_eq!(reloaded_config.model_auto_compact_token_limit, None);
+    }
 
     let communication = InterAgentCommunication::new(
         AgentPath::root(),
