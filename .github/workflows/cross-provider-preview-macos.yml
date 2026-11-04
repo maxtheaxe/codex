@@ -1,0 +1,139 @@
+name: Cross-provider preview (Apple silicon)
+
+on:
+  push:
+    tags: ["cross-provider-v0.0.0-preview.*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-provider-preview-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    if: github.repository == 'maxtheaxe/codex'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      TARGET: aarch64-apple-darwin
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      MACOSX_DEPLOYMENT_TARGET: "15.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Validate platform and preview tag
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          [[ "$GITHUB_REF_NAME" =~ ^cross-provider-v0\.0\.0-preview\.[0-9]+$ ]]
+          echo "PACKAGE_VERSION=${GITHUB_REF_NAME#cross-provider-v}" >> "$GITHUB_ENV"
+          echo "STABLE_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+      - name: Test isolated launcher
+        run: python3 -m unittest discover -s scripts/cross_provider_preview -v
+      - name: Build locked CLI and companion binaries
+        working-directory: codex-rs
+        run: |
+          cargo build --locked --release --target "$TARGET" \
+            --bin codex --bin codex-code-mode-host --bin codex-exec-server
+      - name: Assemble and ad-hoc sign the package
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/preview-package"
+          binaries="$CARGO_TARGET_DIR/$TARGET/release"
+          python3 scripts/build_codex_package.py \
+            --target "$TARGET" --package-version "$PACKAGE_VERSION" \
+            --package-dir "$package" --strip all \
+            --entrypoint-bin "$binaries/codex" \
+            --code-mode-host-bin "$binaries/codex-code-mode-host" \
+            --exec-server-bin "$binaries/codex-exec-server"
+          cp scripts/cross_provider_preview/codex-preview "$package/"
+          chmod 755 "$package/codex-preview"
+          cp docs/cross-provider-preview-macos.md "$package/README.md"
+          cp docs/cross-provider-subagents.md docs/cross-provider-validation.md "$package/"
+          cp LICENSE NOTICE "$package/"
+          for binary in codex codex-code-mode-host codex-exec-server; do
+            [[ "$(lipo -archs "$package/bin/$binary")" == arm64 ]]
+            codesign --force --sign - "$package/bin/$binary"
+            codesign --verify --strict "$package/bin/$binary"
+          done
+          {
+            echo "Source: https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA"
+            echo "Tag: $GITHUB_REF_NAME"
+            echo "Build: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Patched source baseline: 562c52388265bfd8e7b747173ed2efaa4d063057"
+            echo "Target: $TARGET; minimum macOS: $MACOSX_DEPLOYMENT_TARGET"
+            echo "Profile: release; LTO off; debug symbols off"
+            rustc --version
+            sw_vers
+          } > "$package/BUILD-INFO.txt"
+          git diff --exit-code -- codex-rs/Cargo.lock
+          mkdir -p dist
+          tar -czf dist/codex-cross-provider-aarch64-apple-darwin.tar.gz -C "$package" .
+          (cd dist && shasum -a 256 codex-cross-provider-aarch64-apple-darwin.tar.gz > SHA256SUMS)
+      - name: Verify the distributed archive
+        run: |
+          set -euo pipefail
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          extracted="$RUNNER_TEMP/extracted-preview"
+          mkdir -p "$extracted"
+          tar -xzf dist/codex-cross-provider-aarch64-apple-darwin.tar.gz -C "$extracted"
+          [[ "$("$extracted/codex-preview" --version)" == "codex-cli 0.0.0" ]]
+          "$extracted/codex-preview" --help > "$RUNNER_TEMP/preview-help.txt"
+          "$extracted/codex-preview" features list > "$RUNNER_TEMP/preview-features.txt"
+          "$extracted/codex-path/rg" --version
+          for binary in codex codex-code-mode-host codex-exec-server; do
+            codesign --verify --strict "$extracted/bin/$binary"
+          done
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: cross-provider-apple-silicon
+          path: dist/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'Unofficial Apple-silicon Codex CLI preview; macOS 15 or newer.'
+            echo
+            echo "Source commit: $GITHUB_SHA"
+            echo "Build and checks: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo 'Extract the archive into its own directory and run `./codex-preview`.'
+            echo 'The launcher uses `~/.codex-cross-provider-preview` and separate login state.'
+            echo 'Keep all bundled helpers together. Your usual Codex installation is not replaced.'
+            echo
+            echo 'This build is ad-hoc signed, not Apple-notarized. Cross-provider inference was'
+            echo 'tested with mock servers; live OpenAI/OpenRouter interoperability remains unverified.'
+            echo 'Installing separately does not provide a separate account usage allowance.'
+            echo
+            echo "[Installation, configuration, and removal instructions](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/cross-provider-preview-macos.md)."
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$GITHUB_REF_NAME" \
+            dist/codex-cross-provider-aarch64-apple-darwin.tar.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --latest=false \
+            --title "Cross-provider Codex preview — Apple silicon ($PACKAGE_VERSION)" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Keep this launcher beside codex-package.json and the package's bin directory.
+set -eu
+package_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+export CODEX_HOME="$HOME/.codex-cross-provider-preview"
+umask 077
+mkdir -p "$CODEX_HOME"
+exec "$package_dir/bin/codex" -c 'cli_auth_credentials_store="file"' "$@"
