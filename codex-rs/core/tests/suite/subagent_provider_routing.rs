@@ -10,6 +10,7 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::TestCodex;
@@ -170,6 +171,11 @@ async fn spawn_routes_child_to_selected_provider(
     let root = root_request.single_request();
     let child_http = child_request.single_request();
     assert_eq!(root.body_json()["model"], root_model);
+    assert!(
+        namespace_child_tool(&root.body_json(), "collaboration", "spawn_agent")
+            .and_then(|tool| tool.pointer("/parameters/properties/model_provider"))
+            .is_some()
+    );
     assert_eq!(child_http.body_json()["model"], child_model);
     let expected_auth = |provider| {
         if provider == "openai" {
@@ -500,6 +506,11 @@ async fn legacy_spawn_routes_to_selected_provider(
     let root = root_request.single_request();
     let child_http = child_request.single_request();
     assert_eq!(root.body_json()["model"], root_model);
+    assert!(
+        namespace_child_tool(&root.body_json(), "multi_agent_v1", "spawn_agent")
+            .and_then(|tool| tool.pointer("/parameters/properties/model_provider"))
+            .is_some()
+    );
     assert_eq!(child_http.body_json()["model"], child_model);
     assert_eq!(
         root.header("authorization").as_deref(),
