@@ -159,6 +159,8 @@ pub(crate) fn select_agent_model_provider(config: &mut Config, id: &str) -> Resu
     config.model_provider_id = id.to_string();
     config.model_provider = provider;
     config.model_catalog = None;
+    config.agent_default_subagent_model = None;
+    config.agent_default_subagent_reasoning_effort = None;
     config.model_context_window = None;
     config.model_auto_compact_token_limit = None;
     config.model_reasoning_effort = None;

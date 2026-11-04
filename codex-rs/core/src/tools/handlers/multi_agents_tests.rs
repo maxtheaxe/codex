@@ -2,9 +2,12 @@ use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::ThreadStoreBuilder;
+use crate::agent::child_config::SpawnConfigOptions;
+use crate::agent::child_config::SpawnConfigVersion;
 use crate::agent::child_config::apply_spawn_agent_service_tier;
 use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::child_config::build_agent_spawn_config;
+use crate::agent::child_config::prepare_agent_spawn_config;
 use crate::agent::child_config::select_agent_model_provider;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
@@ -4753,6 +4756,8 @@ async fn selecting_child_provider_resets_model_specific_settings() {
         .insert("ollama".to_string(), providers["ollama"].clone());
     config.model_provider_id = "openai".to_string();
     config.model_provider = providers["openai"].clone();
+    config.agent_default_subagent_model = Some("parent-default".to_string());
+    config.agent_default_subagent_reasoning_effort = Some(ReasoningEffort::High);
     config.model_context_window = Some(1234);
     config.model_auto_compact_token_limit = Some(1000);
     config.model_reasoning_effort = Some(ReasoningEffort::High);
@@ -4765,6 +4770,8 @@ async fn selecting_child_provider_resets_model_specific_settings() {
 
     assert!(select_agent_model_provider(&mut config, "ollama").unwrap());
     assert_eq!(config.model_provider_id, "ollama");
+    assert!(config.agent_default_subagent_model.is_none());
+    assert!(config.agent_default_subagent_reasoning_effort.is_none());
     assert!(config.model_context_window.is_none());
     assert!(config.model_auto_compact_token_limit.is_none());
     assert!(config.model_reasoning_effort.is_none());
@@ -4773,4 +4780,173 @@ async fn selecting_child_provider_resets_model_specific_settings() {
     assert!(config.base_instructions.is_none());
     assert!(!select_agent_model_provider(&mut config, "ollama").unwrap());
     assert!(select_agent_model_provider(&mut config, "missing").is_err());
+}
+
+#[tokio::test]
+async fn spawn_provider_selection_validates_policy_and_history() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    let providers = built_in_model_providers(None);
+    config.model_provider_id = "openai".to_string();
+    config
+        .model_providers
+        .insert("ollama".to_string(), providers["ollama"].clone());
+    turn.config = Arc::new(config.clone());
+    let step = StepContext::for_test(Arc::new(turn));
+
+    for model in [None, Some(""), Some("  ")] {
+        let err = prepare_agent_spawn_config(
+            &session,
+            &step,
+            SpawnConfigOptions {
+                version: SpawnConfigVersion::V2,
+                full_history_fork: false,
+                role_name: None,
+                model,
+                model_provider: Some("ollama"),
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .err()
+        .expect("switching providers needs a model");
+        assert!(err.contains("explicit nonempty model"), "{err}");
+    }
+    for version in [SpawnConfigVersion::V1, SpawnConfigVersion::V2] {
+        let err = prepare_agent_spawn_config(
+            &session,
+            &step,
+            SpawnConfigOptions {
+                version,
+                full_history_fork: true,
+                role_name: None,
+                model: Some("vendor/model"),
+                model_provider: Some("ollama"),
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .err()
+        .expect("cross-provider full history must be rejected");
+        assert!(err.contains("fork_turns=none"), "{err}");
+    }
+
+    let switched = prepare_agent_spawn_config(
+        &session,
+        &step,
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: None,
+            model: Some("vendor/unknown-model"),
+            model_provider: Some("ollama"),
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .expect("qualified custom model should be accepted");
+    assert_eq!(
+        switched.config.model.as_deref(),
+        Some("vendor/unknown-model")
+    );
+    assert_eq!(switched.config.model_provider_id, "ollama");
+
+    config.config_layer_stack = codex_config::ConfigLayerStack::new(
+        Vec::new(),
+        codex_config::ConfigRequirements::default(),
+        codex_config::ConfigRequirementsToml {
+            model_provider: Some("openai".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("managed requirements");
+    let (_unused_session, mut locked_turn) = make_session_and_context().await;
+    locked_turn.config = Arc::new(config);
+    let locked_step = StepContext::for_test(Arc::new(locked_turn));
+    let err = prepare_agent_spawn_config(
+        &session,
+        &locked_step,
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: None,
+            model: Some("vendor/model"),
+            model_provider: Some("ollama"),
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .err()
+    .expect("managed provider cannot be changed");
+    assert!(err.contains("managed") && err.contains("openai"), "{err}");
+}
+
+#[tokio::test]
+async fn same_provider_keeps_effective_runtime_provider() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = "openai".to_string();
+    config.model_provider.base_url = Some("https://effective.example/v1".to_string());
+    config.model_providers.insert(
+        "openai".to_string(),
+        built_in_model_providers(None)["openai"].clone(),
+    );
+    let effective = config.model_provider.clone();
+    assert!(!select_agent_model_provider(&mut config, "openai").unwrap());
+    assert_eq!(config.model_provider, effective);
+}
+
+#[tokio::test]
+async fn explicit_custom_provider_accepts_unknown_model_but_rejects_disabled_model() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let providers = built_in_model_providers(None);
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = "ollama".to_string();
+    config.model_provider = providers["ollama"].clone();
+    turn.provider = create_model_provider(config.model_provider.clone(), turn.auth_manager.clone());
+    turn.multi_agent_version = codex_protocol::protocol::MultiAgentVersion::V2;
+    turn.config = Arc::new(config);
+    let mut catalog = codex_models_manager::bundled_models_response().expect("bundled models");
+    let mut disabled = catalog.models[0].clone();
+    disabled.slug = "vendor/disabled".to_string();
+    disabled.supported_in_api = true;
+    disabled.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::Disabled);
+    catalog.models = vec![disabled];
+    session.services.models_manager = Arc::new(StaticModelsManager::new(
+        None,
+        catalog,
+        codex_protocol::openai_models::ModelOrigin::ExplicitConfig,
+    ));
+    let step = StepContext::for_test(Arc::new(turn));
+    let result = prepare_agent_spawn_config(
+        &session,
+        &step,
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: None,
+            model: Some("vendor/unknown-model"),
+            model_provider: Some("ollama"),
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .expect("unknown custom model should use synthetic metadata");
+    assert_eq!(result.config.model.as_deref(), Some("vendor/unknown-model"));
+    let err = prepare_agent_spawn_config(
+        &session,
+        &step,
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: None,
+            model: Some("vendor/disabled"),
+            model_provider: Some("ollama"),
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .err()
+    .expect("disabled catalog model must not use unknown-model fallback");
+    assert!(err.contains("Unknown model"), "{err}");
 }
