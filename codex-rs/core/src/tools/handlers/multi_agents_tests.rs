@@ -4911,7 +4911,10 @@ async fn explicit_custom_provider_accepts_unknown_model_but_rejects_disabled_mod
     disabled.slug = "vendor/disabled".to_string();
     disabled.supported_in_api = true;
     disabled.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::Disabled);
-    catalog.models = vec![disabled];
+    let mut filtered_disabled = disabled.clone();
+    filtered_disabled.slug = "vendor/filtered-disabled".to_string();
+    filtered_disabled.supported_in_api = false;
+    catalog.models = vec![disabled, filtered_disabled];
     session.services.models_manager = Arc::new(StaticModelsManager::new(
         None,
         catalog,
@@ -4949,4 +4952,23 @@ async fn explicit_custom_provider_accepts_unknown_model_but_rejects_disabled_mod
     .err()
     .expect("disabled catalog model must not use unknown-model fallback");
     assert!(err.contains("Unknown model"), "{err}");
+    let err = prepare_agent_spawn_config(
+        &session,
+        &step,
+        SpawnConfigOptions {
+            version: SpawnConfigVersion::V2,
+            full_history_fork: false,
+            role_name: None,
+            model: Some("vendor/filtered-disabled"),
+            model_provider: Some("ollama"),
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .err()
+    .expect("a disabled catalog model filtered from the picker must be rejected");
+    assert!(
+        err.contains("does not support the MultiAgentV2 backend"),
+        "{err}"
+    );
 }

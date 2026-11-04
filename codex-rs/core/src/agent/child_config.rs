@@ -362,6 +362,16 @@ async fn apply_requested_spawn_agent_model_overrides(
             .get_model_info(&selected_model_name, &config.to_models_manager_config())
             .await;
 
+        // The picker list is filtered by auth, but the model metadata comes from the
+        // full catalog. A filtered-out disabled model is not an unknown custom model.
+        if turn.multi_agent_version == MultiAgentVersion::V2
+            && selected_model_info.multi_agent_version == Some(MultiAgentVersion::Disabled)
+        {
+            return Err(format!(
+                "Model `{selected_model_name}` does not support the MultiAgentV2 backend for spawn_agent."
+            ));
+        }
+
         config.model = Some(selected_model_name.clone());
         if let Some(reasoning_effort) = requested_reasoning_effort {
             if selected_model_info.origin != ModelOrigin::Synthetic {
