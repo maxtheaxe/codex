@@ -5,9 +5,9 @@ Apple silicon and macOS 15 or newer. It is not a desktop-app installer. The
 archive includes the CLI, code-mode host, executor, and ripgrep together; keep
 the whole directory intact.
 
-## Build status (2026-11-04)
+## Build history (2026-11-04)
 
-There is no downloadable Mac package from this workflow yet. The
+The
 [preview.2 attempt](https://github.com/maxtheaxe/codex/actions/runs/41846917077),
 at source commit `84e30d990b185f3154e39994cfb77c9499d21659`, passed Apple-silicon
 runner/toolchain setup, V8 checksum verification, and the launcher isolation
@@ -18,11 +18,12 @@ skipped; no distribution artifact was produced. The earlier preview.1 tag was
 rejected before execution because of a workflow expression error, corrected in
 preview.2.
 
-The branch now prepares a lighter preview build at optimization level 1 with 64
-codegen units, retaining the same two-job and one-hour limits. No new build or
-tag has been started for these settings. Their build time and resulting package
-are unverified. The installation instructions below apply once a future build
-successfully publishes an archive.
+Starting with preview.3, the workflow uses a lighter preview build at
+optimization level 1 with 64 codegen units, retaining the same two-job and
+one-hour limits. An archive is published only after its build and startup checks
+pass; follow the run link in the release notes or `BUILD-INFO.txt` for the exact
+result. The installation instructions below apply to successfully published
+archives.
 
 ## Install alongside your usual Codex
 
