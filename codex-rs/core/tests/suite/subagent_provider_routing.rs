@@ -106,7 +106,12 @@ async fn spawn_routes_child_to_selected_provider(
                 "[model_providers.openrouter]\nname = 'OpenRouter'\nbase_url = '{openrouter_url}/v1'\nexperimental_bearer_token = 'openrouter-test-key'\nwire_api = 'responses'\nrequest_max_retries = 0\nstream_max_retries = 0\n"
             )).unwrap();
         })
-        .with_config(move |config| configure(config, &root_provider_owned, &openai_url));
+        .with_config(move |config| {
+            configure(config, &root_provider_owned, &openai_url);
+            if root_provider_owned == "openai" {
+                config.service_tier = Some("flex".to_string());
+            }
+        });
     let test = builder.build_with_auto_env(root_server).await?;
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
@@ -177,6 +182,15 @@ async fn spawn_routes_child_to_selected_provider(
             .is_some()
     );
     assert_eq!(child_http.body_json()["model"], child_model);
+    if root_provider == "openai" {
+        assert_eq!(root.body_json()["service_tier"], "flex");
+        let expected_child_tier = if selected.is_none() {
+            json!("flex")
+        } else {
+            serde_json::Value::Null
+        };
+        assert_eq!(child_http.body_json()["service_tier"], expected_child_tier);
+    }
     let expected_auth = |provider| {
         if provider == "openai" {
             "Bearer openai-test-key"
@@ -316,6 +330,14 @@ async fn spawn_routes_child_to_selected_provider(
     );
     let continued = child_followup.single_request();
     assert_eq!(continued.body_json()["model"], child_model);
+    if root_provider == "openai" {
+        let expected_child_tier = if selected.is_none() {
+            json!("flex")
+        } else {
+            serde_json::Value::Null
+        };
+        assert_eq!(continued.body_json()["service_tier"], expected_child_tier);
+    }
     assert!(
         continued
             .body_json()
