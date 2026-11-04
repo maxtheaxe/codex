@@ -300,6 +300,52 @@ expose_spawn_agent_model_overrides = true
         self.assertFalse(self.preview_home.exists())
         self.assertFalse((self.root / "curl.log").exists())
 
+    def test_import_identifies_openrouter_auth_without_printing_config_values(self):
+        self.normal_state.write_text("""
+[model_providers.openrouter]
+name = "provider-display-name-do-not-log"
+base_url = "https://endpoint-do-not-log.invalid/api/v1"
+wire_api = "responses"
+auth = { command = "credential-helper-do-not-run", args = ["fake-secret-do-not-log"] }
+""")
+        for option in ("--import-config", "--import-config-only"):
+            with self.subTest(option=option):
+                result = self.install(option, success=False)
+                self.assertEqual(
+                    result.stderr,
+                    "codex-preview import: unsupported provider fields: "
+                    "model_providers.openrouter.auth. "
+                    "Credential-helper settings require manual setup.\n",
+                )
+                self.assertEqual(result.stdout, "")
+                self.assertFalse(self.preview_home.exists())
+                self.assertFalse(self.target.exists())
+                self.assertFalse((self.root / "curl.log").exists())
+                self.assertEqual(
+                    self.profile.read_text(), "# existing shell settings\n"
+                )
+
+    def test_import_lists_only_rejected_fields_with_unambiguous_key_paths(self):
+        self.normal_state.write_text(r"""
+[model_providers."router.secondary"]
+name = "accepted-name-do-not-log"
+http_headers = { Authorization = "fake-secret-do-not-log" }
+"custom\nfield" = "custom-value-do-not-log"
+auth = { command = "credential-helper-do-not-run" }
+""")
+        result = self.install("--import-config", success=False)
+        self.assertEqual(
+            result.stderr,
+            "codex-preview import: unsupported provider fields: "
+            'model_providers."router.secondary".auth, '
+            'model_providers."router.secondary"."custom\\nfield", '
+            'model_providers."router.secondary".http_headers. '
+            "Credential-helper settings require manual setup.\n",
+        )
+        self.assertEqual(result.stdout, "")
+        self.assertFalse(self.preview_home.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+
     def test_import_rejects_unsupported_auth_or_provider_routes_before_download(self):
         for entry in (
             'experimental_bearer_token = "fake-secret-do-not-copy"',
@@ -307,7 +353,10 @@ expose_spawn_agent_model_overrides = true
             'http_headers = { Authorization = "fake-secret-do-not-copy" }',
             'base_url = "https://fake-secret-do-not-copy@openrouter.ai/api/v1"',
             'base_url = "https://openrouter.ai/api/v1?key=fake-secret-do-not-copy"',
+            'base_url = "https://[fake-secret-do-not-copy"',
             'env_key = "fake-secret-do-not-copy"',
+            'env_key = ["fake-secret-do-not-copy"]',
+            'env_http_headers = { Authorization = "fake-secret-do-not-copy" }',
             'wire_api = "chat"',
         ):
             with self.subTest(entry=entry.split(" =")[0]):
@@ -315,6 +364,9 @@ expose_spawn_agent_model_overrides = true
                     "[model_providers.router]\n" + entry + "\n"
                 )
                 result = self.install("--import-config", success=False)
+                self.assertIn(
+                    "model_providers.router." + entry.split(" =")[0], result.stderr
+                )
                 self.assertNotIn("fake-secret", result.stdout + result.stderr)
                 self.assertFalse(self.preview_home.exists())
                 self.assertFalse((self.root / "curl.log").exists())

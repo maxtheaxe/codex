@@ -109,17 +109,26 @@ def reject(message):
     raise ImportFailure(message)
 
 
-def select(table, schema):
+def field_path(*parts):
+    # Report keys only. Quote non-bare keys so dots and control characters
+    # cannot make a diagnostic ambiguous or inject terminal output.
+    return ".".join(
+        part if re.fullmatch(r"[A-Za-z0-9_-]+", part) else json.dumps(part)
+        for part in parts
+    )
+
+
+def select(table, schema, path=()):
     if not isinstance(table, dict):
-        reject("a selected config section is not a TOML table")
+        reject(f"{field_path(*path) or 'config'} must be a TOML table")
     selected = {}
     for key, expected in schema.items():
         if key in table:
             value = table[key]
             if type(value) is not expected:
-                reject("a selected setting has an unsupported value type")
+                reject(f"{field_path(*path, key)} has an unsupported value type")
             if expected is list and any(type(item) is not str for item in value):
-                reject("a selected setting requires an array of strings")
+                reject(f"{field_path(*path, key)} requires an array of strings")
             selected[key] = value
     return selected
 
@@ -207,36 +216,56 @@ def main():
         reject("model_providers must be a TOML table")
     imported_providers = {}
     for name, provider in providers.items():
-        if not isinstance(provider, dict) or set(provider) - provider_schema.keys():
-            reject(
-                "a provider uses fields outside the import allowlist (such as inline credentials or auth helpers); configure that provider manually"
+        path = ("model_providers", name)
+        if not isinstance(provider, dict):
+            reject(f"{field_path(*path)} must be a TOML table")
+        unsupported = sorted(set(provider) - provider_schema.keys())
+        if unsupported:
+            fields = ", ".join(field_path(*path, key) for key in unsupported)
+            guidance = (
+                "Credential-helper settings require manual setup."
+                if "auth" in unsupported
+                else "These provider settings require manual setup."
             )
-        imported = select(provider, provider_schema)
+            reject(f"unsupported provider fields: {fields}. {guidance}")
+        imported = select(provider, provider_schema, path)
         if imported.get("wire_api", "responses") != "responses":
             reject(
-                "a provider uses an unsupported wire_api; this preview requires responses"
+                f"{field_path(*path, 'wire_api')}: unsupported protocol; this preview requires responses"
             )
         if "base_url" in imported:
-            url = urlsplit(imported["base_url"])
-            if (
-                url.scheme not in ("http", "https")
-                or not url.hostname
-                or url.username is not None
-                or url.password is not None
-                or url.query
-                or url.fragment
-            ):
-                reject(
-                    "provider URLs must be HTTP(S) endpoints without embedded credentials, query strings or fragments"
+            try:
+                url = urlsplit(imported["base_url"])
+                valid_url = (
+                    url.scheme in ("http", "https")
+                    and bool(url.hostname)
+                    and url.username is None
+                    and url.password is None
+                    and not url.query
+                    and not url.fragment
                 )
-        references = [imported["env_key"]] if "env_key" in imported else []
-        references.extend(imported.get("env_http_headers", {}).values())
-        if any(
-            type(name) is not str or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-            for name in references
-        ):
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                reject(
+                    f"{field_path(*path, 'base_url')} must be an HTTP(S) endpoint without embedded credentials, query strings or fragments"
+                )
+        references = (
+            [((*path, "env_key"), imported["env_key"])] if "env_key" in imported else []
+        )
+        references.extend(
+            ((*path, "env_http_headers", key), value)
+            for key, value in imported.get("env_http_headers", {}).items()
+        )
+        invalid_references = [
+            field_path(*key_path)
+            for key_path, value in references
+            if type(value) is not str
+            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+        ]
+        if invalid_references:
             reject(
-                "provider authentication must reference environment variable names, not credential values"
+                f"{', '.join(invalid_references)} must reference environment variable names, not credential values"
             )
         imported_providers[name] = imported
     if imported_providers:
@@ -252,6 +281,7 @@ def main():
             "notification_method": str,
             "alternate_screen": str,
         },
+        ("tui",),
     )
     if tui:
         selected["tui"] = tui
@@ -264,6 +294,7 @@ def main():
             "enabled": bool,
             "expose_spawn_agent_model_overrides": bool,
         },
+        ("features", "multi_agent_v2"),
     )
     if multi_agent:
         selected["features"] = {"multi_agent_v2": multi_agent}

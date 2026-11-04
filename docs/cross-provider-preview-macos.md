@@ -126,6 +126,10 @@ key is inherited when you launch the preview from that terminal. Configured
 inline credentials, static headers, query parameters, command-based auth,
 gateway OAuth, and other provider fields outside the import allowlist cause a
 clear error before import; those provider setups need manual configuration.
+Errors identify the provider and rejected field paths without printing values.
+For example, `model_providers.openrouter.auth` is reported with the explanation
+that credential-helper settings require manual setup. Accepted fields such as
+`name`, `base_url`, and `wire_api` are not listed as rejected fields.
 Unsupported `wire_api` values are rejected rather than rewritten.
 
 This copies only the selected entries in the base config file. It does not follow
