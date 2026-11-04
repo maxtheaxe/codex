@@ -23,6 +23,10 @@ jobs:
       CODEX_REPO_ROOT: ${{ github.workspace }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_BUILD_JOBS: "2"
+      # This is a functional preview. Avoid the cost of production optimization
+      # on the standard Mac runner; the first opt-level=3 build timed out.
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "64"
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
@@ -82,7 +86,7 @@ jobs:
             echo "Build: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "Patched source baseline: 562c52388265bfd8e7b747173ed2efaa4d063057"
             echo "Target: $TARGET; minimum macOS: $MACOSX_DEPLOYMENT_TARGET"
-            echo "Profile: release; LTO off; debug symbols off"
+            echo "Profile: release; opt-level $CARGO_PROFILE_RELEASE_OPT_LEVEL; codegen units $CARGO_PROFILE_RELEASE_CODEGEN_UNITS; LTO off; debug symbols off"
             rustc --version
             sw_vers
           } > "$package/BUILD-INFO.txt"

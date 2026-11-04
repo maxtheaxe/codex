@@ -5,6 +5,25 @@ Apple silicon and macOS 15 or newer. It is not a desktop-app installer. The
 archive includes the CLI, code-mode host, executor, and ripgrep together; keep
 the whole directory intact.
 
+## Build status (2026-11-04)
+
+There is no downloadable Mac package from this workflow yet. The
+[preview.2 attempt](https://github.com/maxtheaxe/codex/actions/runs/41846917077),
+at source commit `84e30d990b185f3154e39994cfb77c9499d21659`, passed Apple-silicon
+runner/toolchain setup, V8 checksum verification, and the launcher isolation
+test. GitHub canceled compilation at the configured one-hour limit while
+`codex-tui` was compiling. The log has no Rust compiler diagnostic before that
+cancellation. Packaging, extracted-archive startup checks, and publication were
+skipped; no distribution artifact was produced. The earlier preview.1 tag was
+rejected before execution because of a workflow expression error, corrected in
+preview.2.
+
+The branch now prepares a lighter preview build at optimization level 1 with 64
+codegen units, retaining the same two-job and one-hour limits. No new build or
+tag has been started for these settings. Their build time and resulting package
+are unverified. The installation instructions below apply once a future build
+successfully publishes an archive.
+
 ## Install alongside your usual Codex
 
 Download the `.tar.gz` archive and `SHA256SUMS` from the same GitHub prerelease.
@@ -75,8 +94,10 @@ The dedicated `cross-provider-preview-macos.yml` workflow builds only
 `aarch64-apple-darwin` on the standard public `macos-15` runner. It runs for
 `cross-provider-v0.0.0-preview.N` tags in `maxtheaxe/codex`, independently of the
 upstream release workflow. It uses the repository's package builder, pinned
-Rust/actions, verified V8/ripgrep downloads, locked Cargo dependencies, release
-optimization with LTO/debug symbols disabled, and at most two compiler jobs.
+Rust/actions, verified V8/ripgrep downloads, locked Cargo dependencies, the release
+profile at optimization level 1 with 64 codegen units and LTO/debug symbols
+disabled, and at most two compiler jobs. This functional preview is not optimized
+to the same degree as a production release.
 It performs startup checks after extracting the final archive and publishes a
 GitHub prerelease only on success. The job stops after 60 minutes and has no
 automatic retries. Failed runs retain any completed distribution files as an
@@ -84,6 +105,6 @@ Actions artifact for seven days. No release replaces GitHub's latest stable
 release.
 
 To rebuild after an update, reapply the source patches using
-`cross-provider-subagents.md`, bring this packaging commit onto a dedicated
+`cross-provider-subagents.md`, bring these packaging commits onto a dedicated
 branch, review compatibility, and use a new preview tag. Do not move published
 tags or overwrite existing release assets.
