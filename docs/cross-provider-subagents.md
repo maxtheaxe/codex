@@ -41,7 +41,17 @@ role, in both V1 and V2, instead of routing it through the resuming parent's
 provider. Provider-specific model selection, reasoning, catalog, service-tier,
 and context-limit state inherited from the parent is cleared when switching. A
 role's parent-oriented model setting cannot replace the explicitly selected
-cross-provider model and effort.
+cross-provider model and effort on the initial spawn. Later nested spawns that
+stay on the child's provider still apply the configured role model normally;
+that model ID must be valid at that provider. Use a model-neutral default role
+for mixed-provider trees, or explicitly configure provider-appropriate role
+models, rather than an OpenAI-specific default model for OpenRouter descendants.
+
+Root service-tier inheritance is qualified by provider ID. A child receives the
+root tier only while using the root provider; switching away clears it, and a
+descendant that switches back can inherit it again. Hosts implementing the
+`AgentControl` trait must update to the provider-qualified
+`service_tier(provider_id)` and tier-update interfaces when porting this change.
 
 No independent subprocess, second agent framework, or chat-completions bridge is
 involved. The reusable implementation points are:
