@@ -12,6 +12,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -38,6 +39,15 @@ fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     };
     body.and_then(|body| String::from_utf8(body).ok())
         .is_some_and(|body| body.contains(text))
+}
+
+async fn submit(test: &TestCodex, prompt: &str) -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        test.submit_text_turn(prompt),
+    )
+    .await??;
+    Ok(())
 }
 
 fn configure(config: &mut Config, root_provider: &str, openai_url: &str) {
@@ -146,7 +156,7 @@ async fn spawn_routes_child_to_selected_provider(
     )
     .await;
 
-    test.submit_text_turn(ROOT_PROMPT).await?;
+    submit(&test, ROOT_PROMPT).await?;
     let child_id =
         tokio::time::timeout(std::time::Duration::from_secs(10), created_threads.recv()).await??;
     let child = test.thread_manager.get_thread(child_id).await?;
@@ -217,8 +227,7 @@ async fn spawn_routes_child_to_selected_provider(
         ]),
     )
     .await;
-    test.submit_text_turn("inspect and message the routing worker")
-        .await?;
+    submit(&test, "inspect and message the routing worker").await?;
     let list_output = list_completion.single_request();
     let list: serde_json::Value = serde_json::from_str(
         &list_output
@@ -284,7 +293,7 @@ async fn spawn_routes_child_to_selected_provider(
         ]),
     )
     .await;
-    test.submit_text_turn("continue the routing worker").await?;
+    submit(&test, "continue the routing worker").await?;
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         wait_for_event(child.as_ref(), |event| {
@@ -346,8 +355,7 @@ async fn spawn_routes_child_to_selected_provider(
         ]),
     )
     .await;
-    test.submit_text_turn("interrupt the routing worker")
-        .await?;
+    submit(&test, "interrupt the routing worker").await?;
     let interrupt: serde_json::Value = serde_json::from_str(
         &interrupt_completion
             .single_request()
@@ -384,7 +392,7 @@ async fn unknown_provider_is_reported_to_the_calling_agent() -> Result<()> {
         ]),
     )
     .await;
-    test.submit_text_turn("try missing provider").await?;
+    submit(&test, "try missing provider").await?;
     let output = completion
         .single_request()
         .function_call_output_text("bad-provider")
@@ -471,8 +479,7 @@ async fn legacy_spawn_routes_to_selected_provider(
         ]),
     )
     .await;
-    test.submit_text_turn("start legacy provider worker")
-        .await?;
+    submit(&test, "start legacy provider worker").await?;
     let child_id =
         tokio::time::timeout(std::time::Duration::from_secs(10), created.recv()).await??;
     let child = test.thread_manager.get_thread(child_id).await?;
@@ -565,7 +572,7 @@ async fn switched_child_can_be_interrupted_while_active_and_continued() -> Resul
         ]),
     )
     .await;
-    test.submit_text_turn("start active routing worker").await?;
+    submit(&test, "start active routing worker").await?;
     let child_id =
         tokio::time::timeout(std::time::Duration::from_secs(10), created.recv()).await??;
     let child = test.thread_manager.get_thread(child_id).await?;
@@ -614,7 +621,7 @@ async fn switched_child_can_be_interrupted_while_active_and_continued() -> Resul
         ]),
     )
     .await;
-    test.submit_text_turn("stop active routing worker").await?;
+    submit(&test, "stop active routing worker").await?;
     let interrupt: serde_json::Value = serde_json::from_str(
         &interrupted
             .single_request()
@@ -660,8 +667,7 @@ async fn switched_child_can_be_interrupted_while_active_and_continued() -> Resul
         ]),
     )
     .await;
-    test.submit_text_turn("resume active routing worker")
-        .await?;
+    submit(&test, "resume active routing worker").await?;
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         wait_for_event(child.as_ref(), |event| {
