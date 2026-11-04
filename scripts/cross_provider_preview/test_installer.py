@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import tomllib
 import unittest
 
 
@@ -34,6 +35,10 @@ class InstallerTests(unittest.TestCase):
         self.normal_state = self.user_home / ".codex/config.toml"
         self.normal_state.parent.mkdir()
         self.normal_state.write_text("existing Codex config\n")
+        self.normal_auth = self.normal_state.with_name("auth.json")
+        self.normal_auth.write_text('{"fake_login":"never-copy"}\n')
+        self.preview_home = self.user_home / ".codex-cross-provider-preview"
+        self.preview_config = self.preview_home / "config.toml"
         self.desktop = self.user_home / "Applications/Codex.app/keep"
         self.desktop.parent.mkdir(parents=True)
         self.desktop.write_text("existing Desktop\n")
@@ -92,6 +97,7 @@ class InstallerTests(unittest.TestCase):
             "PREVIEW_TEST_CURL_LOG": str(self.root / "curl.log"),
         }
         self.env.pop("ZDOTDIR", None)
+        self.env.pop("CODEX_HOME", None)
 
     def stub(self, name, content, *, python=False):
         path = self.stub_bin / name
@@ -113,6 +119,7 @@ class InstallerTests(unittest.TestCase):
         self.script.write_text(source)
 
     def install(self, *args, env=None, success=True):
+        original_config = self.normal_state.read_bytes()
         result = subprocess.run(
             ["bash", str(self.script), *args],
             cwd=self.root,
@@ -124,17 +131,210 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         else:
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.normal_state.read_text(), "existing Codex config\n")
+        self.assertEqual(self.normal_state.read_bytes(), original_config)
+        self.assertEqual(self.normal_auth.read_text(), '{"fake_login":"never-copy"}\n')
         self.assertEqual(self.desktop.read_text(), "existing Desktop\n")
         self.assertEqual(
             list(self.target.parent.glob(".codex-preview-install.??????")), []
         )
         return result
 
+    def test_import_only_copies_settings_and_env_providers_without_credentials(self):
+        self.normal_state.write_text(r"""
+model = "example-模型😀"
+model_provider = "openrouter"
+model_reasoning_effort = "high"
+"sqlite_home" = "/usual/state"
+log_dir = "/usual/logs"
+cli_auth_credentials_store = "keyring"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+profile = "work"
+notify = ["touch", "must-not-run"]
+[shell_environment_policy.set]
+OPENROUTER_API_KEY = "fake-secret-do-not-copy"
+[profiles.work]
+model = "profile-not-imported"
+log_dir = "/usual/profile-logs"
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+env_http_headers = { "X-Organization" = "PREVIEW_ORG" }
+[tui]
+theme = 'theme"with\punctuation'
+status_line = ["model-name", "context-remaining"]
+[features.multi_agent_v2]
+enabled = true
+expose_spawn_agent_model_overrides = true
+""")
+        self.normal_state.chmod(0o400)
+        result = self.install(
+            "--import-config-only",
+            env={"OPENROUTER_API_KEY": "fixture-only-never-print"},
+        )
+        original = tomllib.loads(self.normal_state.read_text())
+        imported = tomllib.loads(self.preview_config.read_text())
+        self.assertEqual(imported["model"], "example-模型😀")
+        self.assertEqual(imported["model_providers"], original["model_providers"])
+        self.assertEqual(imported["tui"], original["tui"])
+        self.assertEqual(imported["features"], original["features"])
+        self.assertEqual(
+            set(imported),
+            {
+                "model",
+                "model_provider",
+                "model_reasoning_effort",
+                "model_providers",
+                "tui",
+                "features",
+            },
+        )
+        self.assertNotIn("fake-secret", self.preview_config.read_text())
+        self.assertNotIn("fake-secret", result.stdout + result.stderr)
+        self.assertNotIn(
+            "fixture-only-never-print",
+            self.preview_config.read_text() + result.stdout + result.stderr,
+        )
+        self.assertEqual(self.preview_config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.preview_home.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(list(self.preview_home.iterdir()), [self.preview_config])
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+        self.assertEqual(self.profile.read_text(), "# existing shell settings\n")
+
+    def test_import_can_accompany_install_but_never_replaces_preview_config(self):
+        self.normal_state.write_text('model = "existing-model"\n')
+        self.install("--import-config", "--archive", str(self.archive))
+        self.assertEqual(
+            tomllib.loads(self.preview_config.read_text())["model"], "existing-model"
+        )
+        self.assertTrue(self.target.exists())
+        self.preview_config.write_text('model = "my-preview-setting"\n')
+        result = self.install("--import-config", success=False)
+        self.assertIn("already exists; preserved", result.stderr)
+        self.assertEqual(
+            self.preview_config.read_text(), 'model = "my-preview-setting"\n'
+        )
+        self.assertFalse((self.root / "curl.log").exists())
+
+    def test_import_does_not_write_config_if_archive_verification_fails(self):
+        self.normal_state.write_text('model = "existing-model"\n')
+        self.archive.write_bytes(b"invalid download")
+        self.install("--import-config", "--archive", str(self.archive), success=False)
+        self.assertFalse(self.preview_home.exists())
+
+    def test_import_preserves_preview_login_and_other_state(self):
+        self.normal_state.write_text('model = "existing-model"\n')
+        self.preview_home.mkdir()
+        auth = self.preview_home / "auth.json"
+        auth.write_text("existing preview login")
+        sessions = self.preview_home / "sessions"
+        sessions.mkdir()
+        self.install("--import-config-only")
+        self.assertEqual(auth.read_text(), "existing preview login")
+        self.assertTrue(sessions.is_dir())
+
+    def test_import_honors_custom_codex_home_and_reads_source_symlinks(self):
+        custom = self.user_home / "custom Codex home"
+        custom.mkdir()
+        source = custom / "settings.toml"
+        source.write_text('model = "custom-home-model"\n')
+        source.chmod(0o400)
+        (custom / "config.toml").symlink_to(source)
+        self.install("--import-config-only", env={"CODEX_HOME": str(custom)})
+        self.assertEqual(
+            tomllib.loads(self.preview_config.read_text())["model"], "custom-home-model"
+        )
+        self.assertEqual(source.read_text(), 'model = "custom-home-model"\n')
+
+    def test_import_refuses_symlinked_preview_home(self):
+        self.normal_state.write_text('model = "existing-model"\n')
+        self.preview_home.symlink_to(self.normal_state.parent, target_is_directory=True)
+        result = self.install("--import-config-only", success=False)
+        self.assertIn("not a symlink; preserved", result.stderr)
+
+    def test_import_missing_source_fails_before_download(self):
+        missing_home = self.user_home / "missing Codex home"
+        result = self.install(
+            "--import-config", env={"CODEX_HOME": str(missing_home)}, success=False
+        )
+        self.assertIn("could not read the source", result.stderr)
+        self.assertFalse(self.preview_home.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+
+    def test_import_missing_python_fails_before_download(self):
+        (self.stub_bin / "bash").symlink_to(shutil.which("bash"))
+        result = self.install(
+            "--import-config", env={"PATH": str(self.stub_bin)}, success=False
+        )
+        self.assertIn("requires python3", result.stderr)
+        self.assertFalse(self.preview_home.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+
+    def test_regular_install_does_not_require_python(self):
+        self.stub("python3", "echo 'unexpected Python invocation' >&2; exit 99\n")
+        self.install("--archive", str(self.archive))
+        self.assertTrue(self.target.exists())
+        self.assertFalse(self.preview_home.exists())
+
+    def test_import_refuses_existing_and_dangling_config_links(self):
+        self.preview_home.mkdir()
+        for target in (self.normal_state, self.user_home / "absent-config"):
+            with self.subTest(target=target.name):
+                self.preview_config.symlink_to(target)
+                result = self.install("--import-config-only", success=False)
+                self.assertIn("already exists; preserved", result.stderr)
+                self.assertTrue(self.preview_config.is_symlink())
+                self.preview_config.unlink()
+        self.assertFalse((self.user_home / "absent-config").exists())
+
+    def test_import_rejects_invalid_toml_without_echoing_source(self):
+        self.normal_state.write_text('"fake-secret-do-not-log" = [ invalid value\n')
+        result = self.install("--import-config", success=False)
+        self.assertIn("not valid supported TOML", result.stderr)
+        self.assertNotIn("fake-secret", result.stdout + result.stderr)
+        self.assertFalse(self.preview_home.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+
+    def test_import_rejects_unsupported_auth_or_provider_routes_before_download(self):
+        for entry in (
+            'experimental_bearer_token = "fake-secret-do-not-copy"',
+            'auth = { command = "echo", args = ["fake-secret-do-not-copy"] }',
+            'http_headers = { Authorization = "fake-secret-do-not-copy" }',
+            'base_url = "https://fake-secret-do-not-copy@openrouter.ai/api/v1"',
+            'base_url = "https://openrouter.ai/api/v1?key=fake-secret-do-not-copy"',
+            'env_key = "fake-secret-do-not-copy"',
+            'wire_api = "chat"',
+        ):
+            with self.subTest(entry=entry.split(" =")[0]):
+                self.normal_state.write_text(
+                    "[model_providers.router]\n" + entry + "\n"
+                )
+                result = self.install("--import-config", success=False)
+                self.assertNotIn("fake-secret", result.stdout + result.stderr)
+                self.assertFalse(self.preview_home.exists())
+                self.assertFalse((self.root / "curl.log").exists())
+
+    def test_import_requires_supported_settings_and_compatible_value_types(self):
+        for source in (
+            'log_dir = "/usual/logs"',
+            'model = ["invalid"]',
+            "model_context_window = true",
+        ):
+            with self.subTest(source=source):
+                self.normal_state.write_text(source)
+                self.install("--import-config-only", success=False)
+                self.assertFalse(self.preview_home.exists())
+
     def test_download_install_and_repeat_preserve_profile_and_normal_codex(self):
         self.install()
         self.assertTrue((self.root / "curl.log").is_file())
         self.assertTrue((self.target / "bin/codex-exec-server").is_file())
+        self.assertFalse(self.preview_home.exists())
         self.assertEqual(self.profile.read_text().count("export PATH="), 1)
         backups = list(self.user_home.glob(".zshrc.codex-preview-backup.*"))
         self.assertEqual(len(backups), 1)
@@ -238,7 +438,11 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.profile.read_text(), "# existing shell settings\n")
 
     def test_invalid_arguments_fail_without_changes(self):
-        for arguments in (("--archive",), ("--unknown",)):
+        for arguments in (
+            ("--archive",),
+            ("--unknown",),
+            ("--import-config-only", "--archive", str(self.archive)),
+        ):
             with self.subTest(arguments=arguments):
                 self.install(*arguments, success=False)
                 self.assertFalse(self.target.exists())

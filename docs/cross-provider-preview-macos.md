@@ -69,9 +69,9 @@ run the `export PATH=...` command it prints to activate the command immediately.
 
 It preserves a matching existing installation and refuses to overwrite a
 different package or unrelated files at the destination. It does not replace
-Codex Desktop or your regular CLI, copy config or credentials, sign in, or modify
-Gatekeeper settings. Other shells need manual PATH configuration. No rebuild or
-package manager is involved.
+Codex Desktop or your regular CLI, copy login credentials, sign in, or modify
+Gatekeeper settings. Config import is optional, as described below. Other shells
+need manual PATH configuration. No rebuild or package manager is involved.
 
 If you already downloaded the archive, avoid downloading it again with:
 
@@ -87,10 +87,59 @@ cannot run its cleanup may leave an empty
 after confirming no installer is still running.
 
 Installer verification covers checksum rejection, repeat runs, destination
-preservation, shell profile backups, and PATH lookup in an isolated home. The
+preservation, shell profile backups, PATH lookup, and config import in an isolated
+home. Import checks cover credential/storage exclusions, source preservation,
+existing-config and symlink protection, custom source homes, private file
+permissions, and errors that do not echo config values. The
 published archive also passed two installer runs in a Linux fixture with macOS
 platform commands simulated. Native macOS execution of the installer itself
 remains unverified; the packaged binaries passed the Mac checks listed above.
+
+### Optional one-time config import
+
+The current installer can import selected settings from
+`${CODEX_HOME:-$HOME/.codex}/config.toml` into
+`~/.codex-cross-provider-preview/config.toml`. This requires `python3` on PATH
+running Python 3.11 or newer, for its standard-library TOML parser. The installer
+does not install Python or dependencies. Installation without import still needs
+no Python.
+
+Download the current installer using the command above. To install and import:
+
+```sh
+bash codex-preview-install.sh --import-config
+```
+
+If the preview is already installed, import without downloading the archive or
+changing PATH:
+
+```sh
+bash codex-preview-install.sh --import-config-only
+codex-preview login
+```
+
+The import copies model/reasoning/context preferences, selected TUI settings,
+multi-agent V2 toggles, and provider definitions using environment-based
+authentication. For OpenRouter this includes its endpoint and
+`env_key = "OPENROUTER_API_KEY"`, but **not the key's value**. An already exported
+key is inherited when you launch the preview from that terminal. Configured
+inline credentials, static headers, query parameters, command-based auth,
+gateway OAuth, and other provider fields outside the import allowlist cause a
+clear error before import; those provider setups need manual configuration.
+Unsupported `wire_api` values are rejected rather than rewritten.
+
+This copies only the selected entries in the base config file. It does not follow
+profiles or copy credential files, logs, databases, storage paths, permissions,
+project trust, hooks, MCP servers, plugins, or integrations. Existing environment
+and project-level overrides still apply at runtime. The original config is only
+read; comments and formatting are not copied. Output permissions are `0600`, and
+a new preview home is `0700`.
+
+An existing preview config, including a symlink, is always preserved and causes
+the import to stop. There is no merge or overwrite option. If you already have a
+preview config, review and merge the desired settings manually. To undo a fresh
+import before making further changes, remove only the new preview `config.toml`;
+regular Codex settings and login are unaffected.
 
 ### Manual installation
 
@@ -132,8 +181,8 @@ Use an empty destination for each version. Run the included `codex-preview`
 launcher rather than `bin/codex`. It sets `CODEX_HOME` to
 `~/.codex-cross-provider-preview`, creates it with private permissions, and uses
 file-backed login credentials there. It deliberately overrides an inherited
-`CODEX_HOME`; it does not copy or migrate `~/.codex`. Do not pass configuration
-overrides that redirect storage to your normal installation. Authentication
+`CODEX_HOME`; the launcher does not copy or migrate `~/.codex`. Do not pass
+configuration overrides that redirect storage to your normal installation. Authentication
 files contain secrets; do not commit or share them.
 
 Your usual `codex` command and desktop app remain installed in their existing
@@ -155,7 +204,8 @@ Sign in independently for the preview:
 codex-preview login
 ```
 
-Create `~/.codex-cross-provider-preview/config.toml` using the provider examples
+Import existing provider settings as described above, or create
+`~/.codex-cross-provider-preview/config.toml` using the provider examples
 in the included `cross-provider-subagents.md`. Add your OpenRouter provider and
 export `OPENROUTER_API_KEY` privately in your shell; never put credentials in
 the release or a repository. Ask a parent to spawn a child with an explicit
