@@ -49,6 +49,51 @@ archives.
 
 ## Install alongside your usual Codex
 
+### Automatic installer
+
+Download [install.sh](../scripts/cross_provider_preview/install.sh), review it,
+then run it as your normal user:
+
+```sh
+curl -fL https://raw.githubusercontent.com/maxtheaxe/codex/release/cross-provider-apple-silicon/scripts/cross_provider_preview/install.sh \
+  -o codex-preview-install.sh
+bash codex-preview-install.sh
+```
+
+The installer requires Apple silicon and macOS 15 or newer. It downloads
+preview.3, verifies its pinned SHA-256 before extraction, and installs the whole
+package into `~/Applications/codex-cross-provider-preview`. It adds the package
+root to PATH in `~/.zshrc` (respecting `ZDOTDIR`) or `~/.bash_profile`, backing up
+an existing shell profile before changing it. Open a new terminal afterward, or
+run the `export PATH=...` command it prints to activate the command immediately.
+
+It preserves a matching existing installation and refuses to overwrite a
+different package or unrelated files at the destination. It does not replace
+Codex Desktop or your regular CLI, copy config or credentials, sign in, or modify
+Gatekeeper settings. Other shells need manual PATH configuration. No rebuild or
+package manager is involved.
+
+If you already downloaded the archive, avoid downloading it again with:
+
+```sh
+bash codex-preview-install.sh --archive "$HOME/Downloads/codex-cross-provider-aarch64-apple-darwin.tar.gz"
+```
+
+Use `--no-path` to leave shell startup files untouched. Run `--help` to see the
+options. Failed installs clean up their temporary downloads; the installer never
+deletes an existing package to resolve a conflict. An interrupted installer that
+cannot run its cleanup may leave an empty
+`~/Applications/.codex-preview-install.lock` directory; remove that lock only
+after confirming no installer is still running.
+
+Installer verification covers checksum rejection, repeat runs, destination
+preservation, shell profile backups, and PATH lookup in an isolated home. The
+published archive also passed two installer runs in a Linux fixture with macOS
+platform commands simulated. Native macOS execution of the installer itself
+remains unverified; the packaged binaries passed the Mac checks listed above.
+
+### Manual installation
+
 Download the `.tar.gz` archive and `SHA256SUMS` from the same GitHub prerelease.
 From the download directory, verify the archive before extracting it:
 
