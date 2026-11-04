@@ -1,0 +1,52 @@
+name: Cross-provider preview install smoke (no rebuild)
+
+on:
+  push:
+    branches: ["release/cross-provider-apple-silicon"]
+    paths:
+      - ".github/workflows/cross-provider-preview-smoke.yml"
+      - "scripts/cross_provider_preview/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-provider-preview-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  released-package:
+    if: github.repository == 'maxtheaxe/codex'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Verify installer protections
+        run: python3 -m unittest discover -s scripts/cross_provider_preview -v
+      - name: Download existing preview.3 archive
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]]
+          curl --fail --location --show-error --proto '=https' --tlsv1.2 \
+            --retry 2 --connect-timeout 20 \
+            https://github.com/maxtheaxe/codex/releases/download/cross-provider-v0.0.0-preview.3/codex-cross-provider-aarch64-apple-darwin.tar.gz \
+            --output "$RUNNER_TEMP/codex-preview.tar.gz"
+      - name: Exercise native fresh install and synthetic model requests
+        run: |
+          set -euo pipefail
+          python3 scripts/cross_provider_preview/smoke_release.py \
+            --archive "$RUNNER_TEMP/codex-preview.tar.gz" \
+            | tee "$RUNNER_TEMP/preview-smoke.log"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: preview-install-smoke
+          path: ${{ runner.temp }}/preview-smoke.log
+          if-no-files-found: ignore
+          retention-days: 7
