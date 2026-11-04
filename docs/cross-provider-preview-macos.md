@@ -27,6 +27,41 @@ b9b9227dad847e3ced58414ca087f634526b915b0a8af2d1e9c948725ddeaf09
 Live OpenAI/OpenRouter inference, interactive login, and Gatekeeper approval on
 a user's Mac remain unverified. These are not Apple-notarized binaries.
 
+## Known model-access blocker
+
+A user reported preview.3 rejecting `gpt-6.1-sol` with “not supported when using
+Codex with a ChatGPT account.” This is an unresolved live-use blocker, not an
+installation failure. The same model previously worked for that user in the TUI;
+the failure alone does not establish that the account lacks access.
+
+The bundled fallback catalog selects `gpt-6.1-sol` even with no imported `model`.
+The binary also sends `0.0.0` in its HTTP client version, not just its version
+banner. Both properties are reproduced by the executable smoke test; neither
+has been established as the cause of the live backend rejection. Model catalog
+refresh, current authentication, and backend compatibility still need live
+verification. Reinstalling the same archive does not change these properties.
+
+Before assigning repository work, verify a short model response with the preview's
+login. Use `/status` to check the active account and `/model` to select a model;
+a bundled fallback entry is not proof of backend access. If a model-upgrade
+prompt appears, choose **Use existing model** to retain your explicit selection.
+If requests still fail, inspect model-catalog warnings (F2 in the TUI) rather than
+repeatedly reinstalling. Do not share authentication files or API keys.
+
+The warning that command-line overrides require embedded mode is expected: the
+preview launcher passes `-c cli_auth_credentials_store="file"` to isolate login
+storage. That warning is not itself a model-access diagnosis.
+
+The `cross-provider-preview-smoke.yml` workflow downloads the existing published
+archive and tests a fresh native Mac installation in an isolated home, including
+PATH setup, config import, synthetic login, and model responses from a loopback
+server. It does not compile binaries or call billable model endpoints. Its
+synthetic rejection/recovery checks are not a live ChatGPT entitlement test.
+The fixture's accepted model names are test inputs, not recommendations about
+which models a user's account supports. This checks installation and first-turn
+startup; native cross-provider delegation remains covered by the separate Rust
+integration tests, not by this smoke test.
+
 ## Build history (2026-11-04)
 
 The
@@ -92,8 +127,14 @@ home. Import checks cover credential/storage exclusions, source preservation,
 existing-config and symlink protection, custom source homes, private file
 permissions, and errors that do not echo config values. The
 published archive also passed two installer runs in a Linux fixture with macOS
-platform commands simulated. Native macOS execution of the installer itself
-remains unverified; the packaged binaries passed the Mac checks listed above.
+platform commands simulated. The
+[native Mac install smoke run](https://github.com/maxtheaxe/codex/actions/runs/41888558501)
+then passed all 30 installer/launcher tests and exercised the actual released
+archive on macOS 15.8.2 ARM64: fresh installation, PATH, config import with skipped
+auth, isolated synthetic API-key login, default-model rejection, explicit-model
+recovery, and a custom-provider request. Inference used a loopback server and
+synthetic credentials; this does not validate a real ChatGPT account or OpenRouter
+key. No binary rebuild was performed.
 
 ### Optional one-time config import
 
