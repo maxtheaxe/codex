@@ -3313,6 +3313,110 @@ async fn new_uses_active_provider_for_model_refresh() {
 }
 
 #[tokio::test]
+async fn cross_provider_spawn_uses_host_catalog_and_session_credentials() {
+    use crate::agent::child_config::SpawnConfigOptions;
+    use crate::agent::child_config::SpawnConfigVersion;
+    use crate::agent::child_config::prepare_agent_spawn_config;
+    use codex_model_provider::ModelCatalogFactory;
+    use codex_model_provider::ProviderAuthContext;
+    use codex_model_provider::SharedModelProvider;
+    use codex_models_manager::manager::StaticModelsManager;
+    use codex_protocol::openai_models::ModelOrigin;
+    use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::openai_models::ReasoningEffortPreset;
+
+    #[derive(Default)]
+    struct HostCatalog {
+        providers: std::sync::Mutex<Vec<SharedModelProvider>>,
+    }
+
+    impl ModelCatalogFactory for HostCatalog {
+        fn build(
+            &self,
+            provider: SharedModelProvider,
+            _config_model_catalog: Option<ModelsResponse>,
+            _api_key_model_discovery_default: bool,
+        ) -> SharedModelsManager {
+            let mut model = codex_models_manager::model_info::model_info_from_slug("host/model");
+            model.default_reasoning_level = Some(ReasoningEffort::Low);
+            model.supported_reasoning_levels = vec![ReasoningEffortPreset {
+                effort: ReasoningEffort::Low,
+                description: "Host-supported effort".to_string(),
+            }];
+            let catalog = Arc::new(StaticModelsManager::new(
+                provider.auth_manager(),
+                ModelsResponse {
+                    models: vec![model],
+                },
+                ModelOrigin::ExplicitConfig,
+            ));
+            self.providers.lock().unwrap().push(provider);
+            catalog
+        }
+    }
+
+    let (_home, config, mut manager) = startup_fixture().await;
+    let factory = Arc::new(HostCatalog::default());
+    let root_credentials = manager.auth_manager();
+    Arc::get_mut(&mut manager.state)
+        .expect("unshared manager")
+        .model_catalog = model_catalog::ThreadModelCatalog::new(
+        config.model_provider.clone(),
+        None,
+        factory.clone(),
+        false,
+        ProviderAuthContext {
+            credentials: Arc::clone(&root_credentials),
+            runtime_auth: None,
+        },
+    );
+
+    for credentials in [
+        root_credentials,
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("session-owner")),
+    ] {
+        let (mut session, mut turn) = make_session_and_context().await;
+        session.services.auth_manager = Arc::clone(&credentials);
+        session.services.local_agent_runtime = manager.agent_control().runtime;
+        let mut child_config = (*turn.config).clone();
+        let mut target = child_config.model_providers["ollama"].clone();
+        target.name = "Host target".to_string();
+        child_config
+            .model_providers
+            .insert("target".to_string(), target);
+        turn.config = Arc::new(child_config);
+        let step = StepContext::for_test(Arc::new(turn));
+        let prepared = prepare_agent_spawn_config(
+            &session,
+            &step,
+            SpawnConfigOptions {
+                version: SpawnConfigVersion::V2,
+                full_history_fork: false,
+                role_name: None,
+                model: Some("host/model"),
+                model_provider: Some("target"),
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .expect("prepare child with host catalog");
+        assert_eq!(
+            prepared.config.model_reasoning_effort,
+            Some(ReasoningEffort::Low)
+        );
+        let providers = factory.providers.lock().unwrap();
+        let selected = providers
+            .last()
+            .expect("host factory received target provider");
+        assert_eq!(selected.info().name, "Host target");
+        assert!(Arc::ptr_eq(
+            &selected.auth_manager().expect("provider credential owner"),
+            &credentials,
+        ));
+    }
+}
+
+#[tokio::test]
 async fn startup_catalog_cache_policy_controls_refresh() {
     let server = MockServer::start().await;
     let _ = mount_models_once(&server, ModelsResponse { models: vec![] }).await;

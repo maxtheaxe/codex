@@ -6,8 +6,10 @@ use super::execution::AgentExecutionLimiter;
 use super::residency::V2Residency;
 use crate::agent::api::AgentControl;
 use crate::agent::registry::AgentRegistry;
+use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
 use crate::rollout_budget::RolloutBudget;
+use crate::runtime_auth::RuntimeAuthSlot;
 use crate::session::session::Session;
 use crate::thread_manager::AgentTreeShutdownFailure;
 use crate::thread_manager::AgentTreeShutdownFailureReason;
@@ -16,6 +18,8 @@ use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
 use arc_swap::ArcSwapOption;
 use codex_extension_api::ThreadInstructionsProvider;
+use codex_login::AuthManager;
+use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::AgentPath;
 use codex_protocol::ItemIdGenerator;
 use codex_protocol::SessionId;
@@ -243,6 +247,19 @@ impl LocalAgentRuntime {
             session_id,
             runtime: self.clone(),
         }
+    }
+
+    /// Use the host's catalog factory while retaining the invoking session's auth owner.
+    pub(crate) fn models_manager_for_thread(
+        &self,
+        config: &Config,
+        credentials: Arc<AuthManager>,
+        runtime_auth: &RuntimeAuthSlot,
+        originator: &str,
+    ) -> Option<SharedModelsManager> {
+        self.manager.upgrade().map(|manager| {
+            manager.models_manager_for_thread(config, credentials, runtime_auth, originator)
+        })
     }
 }
 

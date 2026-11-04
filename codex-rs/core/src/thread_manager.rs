@@ -1803,6 +1803,27 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Resolve a thread's catalog using its credential owner and the host's catalog policy.
+    pub(crate) fn models_manager_for_thread(
+        &self,
+        config: &Config,
+        credentials: Arc<AuthManager>,
+        runtime_auth: &crate::runtime_auth::RuntimeAuthSlot,
+        originator: &str,
+    ) -> SharedModelsManager {
+        let runtime = crate::runtime_auth::runtime_for_config(
+            runtime_auth,
+            config,
+            Arc::clone(&credentials),
+            &self.installation_id,
+        );
+        let same_owner = Arc::ptr_eq(&credentials, &self.auth_manager);
+        let manager = self
+            .model_catalog
+            .for_thread(config, credentials, runtime, same_owner);
+        manager.for_originator(originator).unwrap_or(manager)
+    }
+
     pub(crate) fn shared_thread_instructions_provider(
         &self,
         root_thread_id: ThreadId,
@@ -2592,21 +2613,12 @@ impl ThreadManagerState {
                 .map(|parent| Arc::clone(&parent.session.services.runtime_auth))
                 .unwrap_or_default()
         };
-        let runtime = crate::runtime_auth::runtime_for_config(
+        let models_manager = self.models_manager_for_thread(
+            &config,
+            Arc::clone(&auth_manager),
             &runtime_auth,
-            &config,
-            Arc::clone(&auth_manager),
-            &self.installation_id,
+            &startup_context.originator,
         );
-        let manager = self.model_catalog.for_thread(
-            &config,
-            Arc::clone(&auth_manager),
-            runtime,
-            Arc::ptr_eq(&auth_manager, &self.auth_manager),
-        );
-        let models_manager = manager
-            .for_originator(&startup_context.originator)
-            .unwrap_or(manager);
         let spawn_result = Session::spawn(SessionSpawnArgs {
             attached_thread,
             startup,

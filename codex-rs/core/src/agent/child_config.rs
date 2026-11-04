@@ -79,7 +79,8 @@ pub(crate) async fn prepare_agent_spawn_config(
     } else {
         false
     };
-    let models_manager = spawn_models_manager(session, &config, provider_switched);
+    let models_manager =
+        spawn_models_manager(session, &config, provider_switched, &turn.originator);
     apply_requested_spawn_agent_model_overrides(
         step_context,
         &mut config,
@@ -181,18 +182,33 @@ fn spawn_models_manager(
     session: &Session,
     config: &Config,
     provider_switched: bool,
+    originator: &str,
 ) -> SharedModelsManager {
     if !provider_switched {
         return Arc::clone(&session.services.models_manager);
     }
     let credentials = Arc::clone(&session.services.auth_manager);
+    if let Some(manager) = session
+        .services
+        .local_agent_runtime
+        .models_manager_for_thread(
+            config,
+            Arc::clone(&credentials),
+            &session.services.runtime_auth,
+            originator,
+        )
+    {
+        return manager;
+    }
+    // Detached test sessions have no host catalog factory to consult.
     let runtime = crate::runtime_auth::runtime_for_config(
         &session.services.runtime_auth,
         config,
         Arc::clone(&credentials),
         &session.installation_id,
     );
-    crate::thread_manager::build_models_manager(config, credentials, runtime)
+    let manager = crate::thread_manager::build_models_manager(config, credentials, runtime);
+    manager.for_originator(originator).unwrap_or(manager)
 }
 
 /// Builds the base config snapshot for a newly spawned sub-agent.
