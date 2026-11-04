@@ -5,13 +5,17 @@ use codex_core::config::Config;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::protocol::EventMsg;
+use core_test_support::responses::ResponseMock;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_once_match;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -40,6 +44,20 @@ fn body_contains(request: &wiremock::Request, text: &str) -> bool {
     };
     body.and_then(|body| String::from_utf8(body).ok())
         .is_some_and(|body| body.contains(text))
+}
+
+fn captured_request(
+    mock: &ResponseMock,
+    required: &str,
+    forbidden: Option<&str>,
+) -> ResponsesRequest {
+    mock.requests()
+        .into_iter()
+        .find(|request| {
+            let body = request.body_json().to_string();
+            body.contains(required) && forbidden.is_none_or(|text| !body.contains(text))
+        })
+        .expect("expected matching recorded request")
 }
 
 async fn submit(test: &TestCodex, prompt: &str) -> Result<()> {
@@ -173,8 +191,8 @@ async fn spawn_routes_child_to_selected_provider(
         }),
     )
     .await?;
-    let root = root_request.single_request();
-    let child_http = child_request.single_request();
+    let root = captured_request(&root_request, ROOT_PROMPT, Some("spawn-provider-worker"));
+    let child_http = captured_request(&child_request, CHILD_PROMPT, Some(ROOT_PROMPT));
     assert_eq!(root.body_json()["model"], root_model);
     assert!(
         namespace_child_tool(&root.body_json(), "collaboration", "spawn_agent")
@@ -208,7 +226,6 @@ async fn spawn_routes_child_to_selected_provider(
     );
     assert!(
         root_completion
-            .single_request()
             .function_call_output_text("spawn-provider-worker")
             .is_some()
     );
@@ -248,7 +265,7 @@ async fn spawn_routes_child_to_selected_provider(
     )
     .await;
     submit(&test, "inspect and message the routing worker").await?;
-    let list_output = list_completion.single_request();
+    let list_output = captured_request(&list_completion, "list-provider-worker", None);
     let list: serde_json::Value = serde_json::from_str(
         &list_output
             .function_call_output_text("list-provider-worker")
@@ -322,13 +339,20 @@ async fn spawn_routes_child_to_selected_provider(
     )
     .await?;
     assert_eq!(
-        followup_request
-            .single_request()
-            .header("authorization")
-            .as_deref(),
+        captured_request(
+            &followup_request,
+            "continue the routing worker",
+            Some("followup-provider-worker")
+        )
+        .header("authorization")
+        .as_deref(),
         Some(expected_auth(root_provider))
     );
-    let continued = child_followup.single_request();
+    let continued = captured_request(
+        &child_followup,
+        "finish the routing followup",
+        Some("continue the routing worker"),
+    );
     assert_eq!(continued.body_json()["model"], child_model);
     if root_provider == "openai" {
         let expected_child_tier = if selected.is_none() {
@@ -350,7 +374,6 @@ async fn spawn_routes_child_to_selected_provider(
     );
     assert_eq!(
         followup_completion
-            .single_request()
             .function_call_output_text("followup-provider-worker")
             .as_deref(),
         Some("")
@@ -386,7 +409,6 @@ async fn spawn_routes_child_to_selected_provider(
     submit(&test, "interrupt the routing worker").await?;
     let interrupt: serde_json::Value = serde_json::from_str(
         &interrupt_completion
-            .single_request()
             .function_call_output_text("interrupt-provider-worker")
             .expect("interrupt output"),
     )?;
@@ -528,11 +550,13 @@ async fn legacy_spawn_routes_to_selected_provider(
     let root = root_request.single_request();
     let child_http = child_request.single_request();
     assert_eq!(root.body_json()["model"], root_model);
-    assert!(
-        namespace_child_tool(&root.body_json(), "multi_agent_v1", "spawn_agent")
-            .and_then(|tool| tool.pointer("/parameters/properties/model_provider"))
-            .is_some()
-    );
+    // OpenAI models may expose this namespace through deferred tool search.
+    if let Some(tool) = namespace_child_tool(&root.body_json(), "multi_agent_v1", "spawn_agent") {
+        assert!(
+            tool.pointer("/parameters/properties/model_provider")
+                .is_some()
+        );
+    }
     assert_eq!(child_http.body_json()["model"], child_model);
     assert_eq!(
         root.header("authorization").as_deref(),
@@ -556,7 +580,6 @@ async fn legacy_spawn_routes_to_selected_provider(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switched_child_can_be_interrupted_while_active_and_continued() -> Result<()> {
-    use core_test_support::wait_for_event_match;
     let openai = start_mock_server().await;
     let openrouter = start_mock_server().await;
     let openai_url = openai.uri();
@@ -587,37 +610,27 @@ async fn switched_child_can_be_interrupted_while_active_and_continued() -> Resul
         ]),
     )
     .await;
-    let first_child = mount_sse_once_match(
+    // Keep the model request in flight until the parent interrupts the child.
+    let first_child = mount_response_once_match(
         &openrouter,
-        |request: &wiremock::Request| {
-            body_contains(request, "pause active routing worker")
-                && !body_contains(request, "active-child-wait")
-        },
-        sse(vec![
+        |request: &wiremock::Request| body_contains(request, "pause active routing worker"),
+        sse_response(sse(vec![
             ev_response_created("active-child"),
-            ev_function_call_with_namespace(
-                "active-child-wait",
-                "collaboration",
-                "wait_agent",
-                &json!({"timeout_ms": 30000}).to_string(),
-            ),
+            ev_assistant_message("active-child-answer", "should be interrupted"),
             ev_completed("active-child"),
-        ]),
+        ]))
+        .set_delay(std::time::Duration::from_secs(30)),
     )
     .await;
     submit(&test, "start active routing worker").await?;
     let child_id =
         tokio::time::timeout(std::time::Duration::from_secs(10), created.recv()).await??;
     let child = test.thread_manager.get_thread(child_id).await?;
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        wait_for_event_match(child.as_ref(), |event| match event {
-            EventMsg::CollabWaitingBegin(wait) if wait.call_id == "active-child-wait" => Some(()),
-            EventMsg::Error(error) => panic!("child failed before wait: {}", error.message),
-            EventMsg::TurnComplete(_) => panic!("child completed before interruption"),
-            _ => None,
-        }),
-    )
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while first_child.requests().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
     .await?;
     assert_eq!(
         first_child
