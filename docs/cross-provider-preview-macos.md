@@ -5,6 +5,28 @@ Apple silicon and macOS 15 or newer. It is not a desktop-app installer. The
 archive includes the CLI, code-mode host, executor, and ripgrep together; keep
 the whole directory intact.
 
+## Published preview.3
+
+[Download preview.3 and its checksum file](https://github.com/maxtheaxe/codex/releases/tag/cross-provider-v0.0.0-preview.3).
+It was built from source commit `3c764bdf6c963c63fc296f34f531b8767dcafd7c`.
+The [successful Mac run](https://github.com/maxtheaxe/codex/actions/runs/41858118484)
+passed the launcher isolation test, locked compilation of all three binaries,
+ARM64 architecture and ad-hoc signature checks, and checks of the extracted
+archive (`--version`, `--help`, `features list`, and bundled ripgrep startup).
+Compilation took 52 minutes 41 seconds. GitHub's first queue attempt could not
+acquire a Mac runner; the requeued job completed successfully within its one-hour
+execution limit.
+
+The published archive was independently downloaded and verified against the
+published `SHA256SUMS`. Its SHA-256 is:
+
+```text
+b9b9227dad847e3ced58414ca087f634526b915b0a8af2d1e9c948725ddeaf09
+```
+
+Live OpenAI/OpenRouter inference, interactive login, and Gatekeeper approval on
+a user's Mac remain unverified. These are not Apple-notarized binaries.
+
 ## Build history (2026-11-04)
 
 The
