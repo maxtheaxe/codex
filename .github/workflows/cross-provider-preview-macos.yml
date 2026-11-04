@@ -21,7 +21,6 @@ jobs:
     env:
       TARGET: aarch64-apple-darwin
       CODEX_REPO_ROOT: ${{ github.workspace }}
-      CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-target
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_RELEASE_LTO: "off"
@@ -39,6 +38,7 @@ jobs:
           [[ "$GITHUB_REF_NAME" =~ ^cross-provider-v0\.0\.0-preview\.[0-9]+$ ]]
           echo "PACKAGE_VERSION=${GITHUB_REF_NAME#cross-provider-v}" >> "$GITHUB_ENV"
           echo "STABLE_GIT_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/cargo-target" >> "$GITHUB_ENV"
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
