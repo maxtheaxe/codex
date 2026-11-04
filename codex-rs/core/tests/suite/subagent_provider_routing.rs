@@ -207,16 +207,26 @@ async fn spawn_routes_child_to_selected_provider(
     test.submit_text_turn("inspect and message the routing worker")
         .await?;
     let list_output = list_completion.single_request();
-    assert!(
-        list_output
+    let list: serde_json::Value = serde_json::from_str(
+        &list_output
             .function_call_output_text("list-provider-worker")
-            .expect("list output")
-            .contains("worker")
+            .expect("list output"),
+    )?;
+    let worker = list["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .find(|agent| agent["agent_name"] == "/root/worker")
+        .expect("worker in list");
+    assert_eq!(
+        worker["agent_status"],
+        json!({"completed": "provider worker finished"})
     );
-    assert!(
+    assert_eq!(
         list_output
             .function_call_output_text("message-provider-worker")
-            .is_some()
+            .as_deref(),
+        Some("")
     );
 
     // A later native follow-up must use the child's selected provider too.
@@ -288,11 +298,12 @@ async fn spawn_routes_child_to_selected_provider(
         continued.header("authorization").as_deref(),
         Some(expected_auth(child_provider))
     );
-    assert!(
+    assert_eq!(
         followup_completion
             .single_request()
             .function_call_output_text("followup-provider-worker")
-            .is_some()
+            .as_deref(),
+        Some("")
     );
     mount_sse_once_match(
         root_server,
@@ -324,11 +335,15 @@ async fn spawn_routes_child_to_selected_provider(
     .await;
     test.submit_text_turn("interrupt the routing worker")
         .await?;
-    assert!(
-        interrupt_completion
+    let interrupt: serde_json::Value = serde_json::from_str(
+        &interrupt_completion
             .single_request()
             .function_call_output_text("interrupt-provider-worker")
-            .is_some()
+            .expect("interrupt output"),
+    )?;
+    assert_eq!(
+        interrupt["previous_status"],
+        json!({"completed": "followup finished"})
     );
     test.codex.shutdown_and_wait().await?;
     Ok(())
