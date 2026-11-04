@@ -395,7 +395,11 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     session: &Session,
     config: &mut Config,
 ) -> Result<(), String> {
-    let Some(service_tier) = session.services.agent_control.service_tier() else {
+    let Some(service_tier) = session
+        .services
+        .agent_control
+        .service_tier(&config.model_provider_id)
+    else {
         config.service_tier = None;
         return Ok(());
     };

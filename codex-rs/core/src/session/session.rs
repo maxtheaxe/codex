@@ -1081,13 +1081,14 @@ impl Session {
                         .unwrap_or(usize::MAX),
                 );
                 if parent_thread_id.is_none() {
-                    control.propagate_config_update(AgentConfigUpdate::ServiceTier(
-                        session_configuration
+                    control.propagate_config_update(AgentConfigUpdate::ServiceTier {
+                        provider_id: config.model_provider_id.clone(),
+                        service_tier: session_configuration
                             .step_settings
                             .service_tier
                             .clone()
                             .or_else(|| config.service_tier.clone()),
-                    ));
+                    });
                 }
                 let runtime = control.runtime.clone();
                 (Arc::new(control), runtime)

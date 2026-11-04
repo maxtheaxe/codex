@@ -340,14 +340,17 @@ async fn schedule_startup_prewarm_inner(
     );
     let startup_cancellation_token = CancellationToken::new();
     let preconnect_model_info = Arc::clone(startup_turn_context.model_info());
-    // Spawned subagents inherit the root's selection, with the same feature and model filtering
-    // that capture applies to the actual request.
+    // Spawned subagents inherit the root's selection within the same provider, with the same
+    // feature and model filtering that capture applies to the actual request.
     let preconnect_service_tier = if matches!(
         startup_turn_context.session_source,
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
     ) {
         crate::session::get_service_tier(
-            session.services.agent_control.service_tier(),
+            session
+                .services
+                .agent_control
+                .service_tier(&startup_turn_context.config.model_provider_id),
             &session.features(),
             &preconnect_model_info,
         )

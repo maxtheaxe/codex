@@ -2490,7 +2490,10 @@ impl ThreadManagerState {
         // only after registration succeeds, so a failed start cannot update their tree.
         let initial_host_config = (self.agent_control_factory.is_some()
             && parent_thread_id.is_none())
-        .then(|| AgentConfigUpdate::ServiceTier(config.service_tier.clone()));
+        .then(|| AgentConfigUpdate::ServiceTier {
+            provider_id: config.model_provider_id.clone(),
+            service_tier: config.service_tier.clone(),
+        });
         // Both resume entry points must restore identities before children can be loaded lazily.
         if let InitialHistory::Resumed(resumed) = &initial_history
             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)

@@ -135,8 +135,8 @@ pub trait AgentControl: Send + Sync {
         trace: &'a ThreadTraceContext,
     ) -> BoxFuture<'a, ()>;
 
-    /// Read the latest shared service tier for use at normal runtime config update points.
-    fn service_tier(&self) -> Option<String>;
+    /// Read the root's latest service tier only for its selected provider.
+    fn service_tier(&self, provider_id: &str) -> Option<String>;
 
     /// Publish a shared setting synchronously with the runtime's root-owned config update.
     fn propagate_config_update(&self, update: AgentConfigUpdate);
@@ -246,5 +246,8 @@ pub struct AgentTurnOutcome {
 /// Settings shared by the tree. A service tier of `None` restores the default tier.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentConfigUpdate {
-    ServiceTier(Option<String>),
+    ServiceTier {
+        provider_id: String,
+        service_tier: Option<String>,
+    },
 }

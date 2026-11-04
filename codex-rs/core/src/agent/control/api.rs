@@ -294,13 +294,16 @@ impl AgentControl for LocalAgentControl {
         Box::pin(self.notify_parent_of_terminal_turn(outcome, trace))
     }
 
-    fn service_tier(&self) -> Option<String> {
-        self.root_service_tier()
+    fn service_tier(&self, provider_id: &str) -> Option<String> {
+        self.root_service_tier(provider_id)
     }
 
     fn propagate_config_update(&self, update: AgentConfigUpdate) {
         match update {
-            AgentConfigUpdate::ServiceTier(tier) => self.set_root_service_tier(tier),
+            AgentConfigUpdate::ServiceTier {
+                provider_id,
+                service_tier,
+            } => self.set_root_service_tier(provider_id, service_tier),
         }
     }
 

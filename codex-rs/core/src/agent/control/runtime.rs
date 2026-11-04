@@ -202,8 +202,8 @@ pub(crate) struct LocalAgentRuntime {
     pub(super) agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     pub(super) rollout_budget: Arc<RolloutBudget>,
-    /// The user-selected root routing tier, shared by the entire agent tree.
-    pub(super) root_service_tier: Arc<ArcSwapOption<String>>,
+    /// The root's provider and selected routing tier, shared atomically by the agent tree.
+    pub(super) root_service_tier: Arc<ArcSwapOption<super::service_tier::RootServiceTier>>,
     /// Retains the root's opt-in instruction provider even when the root is unloaded.
     pub(super) shared_thread_instructions_provider:
         Arc<OnceLock<Arc<dyn ThreadInstructionsProvider>>>,

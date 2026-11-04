@@ -385,7 +385,7 @@ impl LocalAgentControl {
                     CodexErr::InvalidRequest(format!("permission_profile is invalid: {err}"))
                 })?;
         }
-        config.service_tier = self.root_service_tier();
+        config.service_tier = self.root_service_tier(&stored_model_provider);
         if let Some(model) = stored_model {
             config.model = Some(model);
         }

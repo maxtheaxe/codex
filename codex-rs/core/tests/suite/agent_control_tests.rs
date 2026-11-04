@@ -86,7 +86,7 @@ impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config>
 
 pub(super) struct TestAgentControl {
     thread_id: ThreadId,
-    service_tier: Mutex<Option<String>>,
+    service_tier: Mutex<Option<(String, String)>>,
     mail: Mutex<Vec<PendingAgentMessage>>,
     mailbox_state: tokio::sync::watch::Sender<bool>,
     agents: Mutex<HashMap<String, ThreadId>>,
@@ -213,13 +213,22 @@ impl AgentControl for TestAgentControl {
         Box::pin(async {})
     }
 
-    fn service_tier(&self) -> Option<String> {
-        self.service_tier.lock().expect("service tier lock").clone()
+    fn service_tier(&self, provider_id: &str) -> Option<String> {
+        self.service_tier
+            .lock()
+            .expect("service tier lock")
+            .as_ref()
+            .filter(|(selected_provider, _)| selected_provider == provider_id)
+            .map(|(_, tier)| tier.clone())
     }
 
     fn propagate_config_update(&self, update: AgentConfigUpdate) {
-        let AgentConfigUpdate::ServiceTier(tier) = update;
-        *self.service_tier.lock().expect("service tier lock") = tier;
+        let AgentConfigUpdate::ServiceTier {
+            provider_id,
+            service_tier,
+        } = update;
+        *self.service_tier.lock().expect("service tier lock") =
+            service_tier.map(|tier| (provider_id, tier));
     }
 
     fn get_guardian_package(
@@ -317,7 +326,10 @@ async fn host_threads_preserve_lineage_settings_and_resume_routing() -> anyhow::
         ),
         (controller.identity(), Some(root_id))
     );
-    assert_eq!(controller.service_tier(), Some("priority".to_string()));
+    assert_eq!(
+        controller.service_tier(&test.config.model_provider_id),
+        Some("priority".to_string())
+    );
     let message = codex_protocol::protocol::InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::root().join("worker").expect("valid child path"),
@@ -419,7 +431,10 @@ async fn host_threads_preserve_lineage_settings_and_resume_routing() -> anyhow::
                 "{error:?}"
             );
         }
-        assert_eq!(controller.service_tier(), Some("priority".to_string()));
+        assert_eq!(
+            controller.service_tier(&test.config.model_provider_id),
+            Some("priority".to_string())
+        );
     }
     child.thread.shutdown_and_wait().await?;
     test.thread_manager.remove_thread(&child.thread_id).await;

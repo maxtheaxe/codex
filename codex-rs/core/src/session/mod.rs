@@ -2187,13 +2187,18 @@ impl Session {
             state.session_configuration = updated;
             if root_service_tier_changed {
                 self.services.agent_control.propagate_config_update(
-                    AgentConfigUpdate::ServiceTier(
-                        state
+                    AgentConfigUpdate::ServiceTier {
+                        provider_id: state
+                            .session_configuration
+                            .original_config_do_not_use
+                            .model_provider_id
+                            .clone(),
+                        service_tier: state
                             .session_configuration
                             .step_settings
                             .service_tier
                             .clone(),
-                    ),
+                    },
                 );
             }
             let new_config = notify_config_contributors
@@ -4236,7 +4241,10 @@ impl Session {
             turn_context.session_source,
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
         ) {
-            let root_service_tier = self.services.agent_control.service_tier();
+            let root_service_tier = self
+                .services
+                .agent_control
+                .service_tier(&turn_context.config.model_provider_id);
             if settings.selected().service_tier != root_service_tier {
                 let mut selected = settings.selected().clone();
                 selected.service_tier = root_service_tier;
