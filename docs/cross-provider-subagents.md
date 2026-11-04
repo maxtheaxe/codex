@@ -36,14 +36,22 @@ necessary task context in the child's `message`.
 
 The child remains an ordinary Codex thread with the inherited working directory,
 permissions, approval policy, cancellation, message delivery, and completion
-reporting. No independent subprocess, second agent framework, or chat-completions
-bridge is involved. The reusable implementation points are:
+reporting. Cold resume restores the child's saved provider before reapplying its
+role, in both V1 and V2, instead of routing it through the resuming parent's
+provider. Provider-specific model selection, reasoning, catalog, service-tier,
+and context-limit state inherited from the parent is cleared when switching. A
+role's parent-oriented model setting cannot replace the explicitly selected
+cross-provider model and effort.
+
+No independent subprocess, second agent framework, or chat-completions bridge is
+involved. The reusable implementation points are:
 
 | Layer | Responsibility |
 | --- | --- |
 | `core/src/tools/handlers/multi_agents_spec.rs` | Advertise `model_provider` consistently with model overrides. |
 | `core/src/tools/handlers/multi_agents{,_v2}/spawn.rs` | Parse the selector and pass it into shared child configuration. |
 | `core/src/agent/child_config.rs` | Resolve and validate the child's provider/model before native thread creation. |
+| Native agent resume path | Restore the saved provider and apply child settings before cold reload. |
 | Existing provider/auth/client code | Send child inference using that provider's configured endpoint and credentials. |
 
 Paths in this table are relative to `codex-rs/`. Provider selection is not a
@@ -87,15 +95,30 @@ The OpenRouter configuration reuses Codex's existing Responses transport. The
 documents that base URL and provider setup. Its command-auth option may be useful
 when provider-specific model catalog discovery is needed. `env_key` configures
 inference authentication; it does not guarantee a refreshed Codex model catalog.
-This feature therefore accepts an explicit model for a provider switch instead
-of requiring that model to appear in the parent's picker.
+Child spawn resolves model metadata offline; command-auth setup alone does not
+guarantee a catalog refresh during spawn. This feature therefore accepts an
+explicit custom-provider model instead of requiring that model to appear in the
+parent's picker. OpenAI models still use their selected provider's catalog
+validation.
+
+Prefer a valid cached Codex-format catalog associated with the selected
+provider's identity when accurate model metadata is available. A public
+OpenAI-compatible `/models` listing is not that catalog. Unknown custom models
+use Codex's synthetic fallback metadata, including a 272,000-token context window
+at this baseline; that value is not a verified limit for the routed model. The
+switch clears inherited parent context limits and an inherited catalog, but
+does not discover the target model's actual limits. Check the selected model's
+documented capacity before sending large tasks.
 
 The
 [OpenRouter OpenAPI specification](https://github.com/OpenRouterTeam/docs/blob/main/openapi/openapi.yaml)
 also describes namespace tools, custom tools, and namespace-qualified calls.
 There is no additional tool-flattening adapter in this patch. Those published
 schemas do not establish that every routed model supports the entire Codex tool
-surface. Check the chosen model and route with the smoke test below.
+surface. Vendor-specific reasoning signatures or reasoning-content formats may
+also differ from Codex's expected Responses representation; round trips for
+those formats remain unverified. Check the chosen model and route with the smoke
+test below.
 
 ## Use either parent direction
 
@@ -165,8 +188,8 @@ python3 scripts/cross_provider_patchset.py export \
 
 The output directory must be new and outside every worktree and Git directory
 belonging to the source repository. The helper never commits generated patches
-into their own feature range. Keep the generated bundle as a release artifact
-alongside the source branch; do not add it to Codex's existing dependency
+into their own feature range. Keep the generated local bundle for review or
+distribution alongside the source branch; do not add it to Codex's existing dependency
 `patches/` directory.
 
 `manifest.json` records the exact base commit/tree, source head/tree, each ordered
@@ -218,8 +241,9 @@ python3 -m unittest discover -s scripts -p test_cross_provider_patchset.py -v
 
 cd codex-rs
 cargo fmt --all -- --check
-cargo test -p codex-core child_config
-cargo test -p codex-core multi_agents
+cargo test -p codex-core --lib multi_agents
+cargo test -p codex-core --lib resume_agent_from_rollout_preserves_child_provider
+cargo test -p codex-core --test all subagent_provider_routing
 cargo build -p codex-cli --bin codex
 ```
 
@@ -238,6 +262,8 @@ For a live smoke test with preexisting credentials and permitted endpoints:
    without an inference request to the unintended provider.
 5. Confirm a managed provider lock refuses a disallowed selection. Inspect only
    non-secret endpoint/provider metadata; do not record authorization headers.
+6. Cold-resume a persisted child through a parent using the other provider and
+   confirm the child retains its saved provider/model and native message flow.
 
 Offline unit/integration mocks can verify routing, authorization selection,
 errors, and native lifecycle without spending provider credits. They cannot prove
