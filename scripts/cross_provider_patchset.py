@@ -30,9 +30,18 @@ class PatchsetError(Exception):
 def git(repo: Path, *args: str, input_data: bytes | None = None) -> bytes:
     # Do not execute repository hooks or trigger signing dialogs while applying.
     command = [
-        "git", "-C", str(repo), "-c", "core.hooksPath=/dev/null",
-        "-c", "commit.gpgsign=false", "-c", "am.threeWay=false",
-        "-c", "rerere.enabled=false", *args,
+        "git",
+        "-C",
+        str(repo),
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "am.threeWay=false",
+        "-c",
+        "rerere.enabled=false",
+        *args,
     ]
     result = subprocess.run(command, input=input_data, capture_output=True, check=False)
     if result.returncode:
@@ -47,7 +56,9 @@ def git_text(repo: Path, *args: str) -> str:
 
 def resolve(repo: Path, revision: str, kind: str = "commit") -> str:
     # --end-of-options prevents a revision supplied by a manifest becoming an option.
-    return git_text(repo, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{{kind}}}")
+    return git_text(
+        repo, "rev-parse", "--verify", "--end-of-options", f"{revision}^{{{kind}}}"
+    )
 
 
 def repository(path: Path) -> Path:
@@ -56,13 +67,24 @@ def repository(path: Path) -> Path:
 
 def require_clean(repo: Path) -> None:
     if git(repo, "status", "--porcelain=v1", "--untracked-files=all"):
-        raise PatchsetError("target must be clean, including untracked files; save your work first")
-    for state in ("rebase-apply", "rebase-merge", "sequencer", "MERGE_HEAD", "REVERT_HEAD", "CHERRY_PICK_HEAD"):
+        raise PatchsetError(
+            "target must be clean, including untracked files; save your work first"
+        )
+    for state in (
+        "rebase-apply",
+        "rebase-merge",
+        "sequencer",
+        "MERGE_HEAD",
+        "REVERT_HEAD",
+        "CHERRY_PICK_HEAD",
+    ):
         state_path = Path(git_text(repo, "rev-parse", "--git-path", state))
         if not state_path.is_absolute():
             state_path = repo / state_path
         if state_path.exists():
-            raise PatchsetError(f"finish or abort the existing Git operation ({state}) first")
+            raise PatchsetError(
+                f"finish or abort the existing Git operation ({state}) first"
+            )
 
 
 def linear_commits(repo: Path, base: str, head: str) -> list[str]:
@@ -84,15 +106,24 @@ def sha256(data: bytes) -> str:
 def outside_repo(path: Path, repo: Path) -> None:
     # Worktrees share object storage. Refuse output in any checkout or Git internals,
     # including when --repo points to a linked worktree rather than the main checkout.
-    roots = [repo, Path(git_text(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()]
+    roots = [
+        repo,
+        Path(
+            git_text(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        ).resolve(),
+    ]
     for field in git(repo, "worktree", "list", "--porcelain", "-z").split(b"\0"):
         if field.startswith(b"worktree "):
-            roots.append(Path(field[len(b"worktree "):].decode()).resolve())
+            roots.append(Path(field[len(b"worktree ") :].decode()).resolve())
     if any(path == root or root in path.parents for root in roots):
-        raise PatchsetError("bundle must be outside all repository worktrees and Git internals to avoid recursive patch exports")
+        raise PatchsetError(
+            "bundle must be outside all repository worktrees and Git internals to avoid recursive patch exports"
+        )
 
 
-def export_bundle(repo: Path, base_revision: str, head_revision: str, output: Path) -> None:
+def export_bundle(
+    repo: Path, base_revision: str, head_revision: str, output: Path
+) -> None:
     base = resolve(repo, base_revision)
     head = resolve(repo, head_revision)
     commits = linear_commits(repo, base, head)
@@ -110,17 +141,36 @@ def export_bundle(repo: Path, base_revision: str, head_revision: str, output: Pa
         for index, commit in enumerate(commits, 1):
             tree = resolve(repo, commit, "tree")
             if tree == previous_tree:
-                raise PatchsetError(f"empty commit {commit} cannot be applied by this helper")
+                raise PatchsetError(
+                    f"empty commit {commit} cannot be applied by this helper"
+                )
             name = f"{index:04d}-{commit}.patch"
             patch = git(
-                repo, "format-patch", "-1", "--stdout", "--binary", "--full-index",
-                "--no-renames", "--no-stat", "--no-signature", "--no-cover-letter",
-                "--no-notes", "--no-thread", "--subject-prefix=PATCH", "--no-color",
-                "--no-ext-diff", "--no-textconv", "--diff-algorithm=myers",
-                "--src-prefix=a/", "--dst-prefix=b/", commit,
+                repo,
+                "format-patch",
+                "-1",
+                "--stdout",
+                "--binary",
+                "--full-index",
+                "--no-renames",
+                "--no-stat",
+                "--no-signature",
+                "--no-cover-letter",
+                "--no-notes",
+                "--no-thread",
+                "--subject-prefix=PATCH",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--diff-algorithm=myers",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                commit,
             )
             (staging / name).write_bytes(patch)
-            entries.append({"file": name, "commit": commit, "tree": tree, "sha256": sha256(patch)})
+            entries.append(
+                {"file": name, "commit": commit, "tree": tree, "sha256": sha256(patch)}
+            )
             previous_tree = tree
         manifest = {
             "schema": SCHEMA,
@@ -151,7 +201,9 @@ def load_bundle(bundle: Path) -> tuple[dict, list[Path]]:
     if not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA:
         raise PatchsetError("unsupported patchset manifest schema")
     for key in ("base", "base_tree", "source_head", "source_tree"):
-        if not isinstance(manifest.get(key), str) or not OBJECT_ID.fullmatch(manifest[key]):
+        if not isinstance(manifest.get(key), str) or not OBJECT_ID.fullmatch(
+            manifest[key]
+        ):
             raise PatchsetError(f"manifest {key} must be a full Git object ID")
     entries = manifest.get("patches")
     if not isinstance(entries, list) or not entries:
@@ -164,7 +216,11 @@ def load_bundle(bundle: Path) -> tuple[dict, list[Path]]:
         commit = entry.get("commit")
         tree = entry.get("tree")
         digest = entry.get("sha256")
-        if not isinstance(commit, str) or not OBJECT_ID.fullmatch(commit) or commit in commits:
+        if (
+            not isinstance(commit, str)
+            or not OBJECT_ID.fullmatch(commit)
+            or commit in commits
+        ):
             raise PatchsetError("patch commit IDs must be unique full Git object IDs")
         if not isinstance(tree, str) or not OBJECT_ID.fullmatch(tree):
             raise PatchsetError("patch tree must be a full Git object ID")
@@ -175,16 +231,23 @@ def load_bundle(bundle: Path) -> tuple[dict, list[Path]]:
             raise PatchsetError("patch filename/order does not match manifest")
         path = bundle / expected_name
         if path.is_symlink() or not path.is_file():
-            raise PatchsetError(f"patch is missing or is not a regular file: {expected_name}")
+            raise PatchsetError(
+                f"patch is missing or is not a regular file: {expected_name}"
+            )
         if sha256(path.read_bytes()) != digest:
             raise PatchsetError(f"patch integrity check failed: {expected_name}")
         paths.append(path)
         commits.add(commit)
-    if entries[-1]["commit"] != manifest["source_head"] or entries[-1]["tree"] != manifest["source_tree"]:
+    if (
+        entries[-1]["commit"] != manifest["source_head"]
+        or entries[-1]["tree"] != manifest["source_tree"]
+    ):
         raise PatchsetError("source head/tree does not match final patch")
     expected_files = {"manifest.json", *(path.name for path in paths)}
     if {path.name for path in bundle.iterdir()} != expected_files:
-        raise PatchsetError("bundle contains unexpected files; keep receipts/build output elsewhere")
+        raise PatchsetError(
+            "bundle contains unexpected files; keep receipts/build output elsewhere"
+        )
     return manifest, paths
 
 
@@ -192,7 +255,9 @@ def check_base(repo: Path, manifest: dict) -> None:
     try:
         actual_tree = resolve(repo, manifest["base"], "tree")
     except PatchsetError as error:
-        raise PatchsetError(f"exact base {manifest['base']} is not available in target") from error
+        raise PatchsetError(
+            f"exact base {manifest['base']} is not available in target"
+        ) from error
     if actual_tree != manifest["base_tree"]:
         raise PatchsetError("base tree differs from manifest")
 
@@ -202,10 +267,14 @@ def verify_applied(repo: Path, manifest: dict) -> list[str]:
     commits = linear_commits(repo, manifest["base"], resolve(repo, "HEAD"))
     entries = manifest["patches"]
     if len(commits) != len(entries):
-        raise PatchsetError("target must contain exactly the bundle commits after its base; later commits are refused")
+        raise PatchsetError(
+            "target must contain exactly the bundle commits after its base; later commits are refused"
+        )
     for commit, entry in zip(commits, entries):
         if resolve(repo, commit, "tree") != entry["tree"]:
-            raise PatchsetError(f"applied content differs from expected tree at {commit}")
+            raise PatchsetError(
+                f"applied content differs from expected tree at {commit}"
+            )
     return commits
 
 
@@ -213,15 +282,21 @@ def apply_bundle(repo: Path, manifest: dict, paths: list[Path]) -> None:
     require_clean(repo)
     check_base(repo, manifest)
     if resolve(repo, "HEAD") != manifest["base"]:
-        raise PatchsetError(f"incompatible target HEAD; check out exact base {manifest['base']} on a new branch")
+        raise PatchsetError(
+            f"incompatible target HEAD; check out exact base {manifest['base']} on a new branch"
+        )
     try:
         git(repo, "am", "--no-3way", "--no-rerere-autoupdate", *map(str, paths))
     except PatchsetError as error:
         try:
             git(repo, "am", "--abort")
         except PatchsetError as abort_error:
-            raise PatchsetError(f"{error}\nAutomatic abort failed: {abort_error}; inspect target before continuing") from error
-        raise PatchsetError(f"{error}\nApplication aborted; original HEAD restored") from error
+            raise PatchsetError(
+                f"{error}\nAutomatic abort failed: {abort_error}; inspect target before continuing"
+            ) from error
+        raise PatchsetError(
+            f"{error}\nApplication aborted; original HEAD restored"
+        ) from error
     verify_applied(repo, manifest)
     print(f"Applied and verified {len(paths)} patches; HEAD {resolve(repo, 'HEAD')}")
 
@@ -235,19 +310,31 @@ def rollback_bundle(repo: Path, manifest: dict) -> None:
         try:
             git(repo, "revert", "--abort")
         except PatchsetError as abort_error:
-            raise PatchsetError(f"{error}\nAutomatic revert abort failed: {abort_error}") from error
-        raise PatchsetError(f"{error}\nRevert aborted; original HEAD restored") from error
+            raise PatchsetError(
+                f"{error}\nAutomatic revert abort failed: {abort_error}"
+            ) from error
+        raise PatchsetError(
+            f"{error}\nRevert aborted; original HEAD restored"
+        ) from error
     if resolve(repo, "HEAD", "tree") != manifest["base_tree"]:
-        raise PatchsetError("rollback completed but tree differs from base; inspect target")
-    print(f"Reverted {len(commits)} patches; original commits remain in history; HEAD {resolve(repo, 'HEAD')}")
+        raise PatchsetError(
+            "rollback completed but tree differs from base; inspect target"
+        )
+    print(
+        f"Reverted {len(commits)} patches; original commits remain in history; HEAD {resolve(repo, 'HEAD')}"
+    )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    export = subparsers.add_parser("export", help="export a linear feature range outside the source repository")
+    export = subparsers.add_parser(
+        "export", help="export a linear feature range outside the source repository"
+    )
     export.add_argument("--repo", type=Path, default=Path.cwd())
-    export.add_argument("--base", required=True, help="full base commit or revision to resolve")
+    export.add_argument(
+        "--base", required=True, help="full base commit or revision to resolve"
+    )
     export.add_argument("--head", default="HEAD")
     export.add_argument("--output", type=Path, required=True)
     for command in ("apply", "verify", "rollback"):
@@ -267,7 +354,9 @@ def main() -> int:
             elif args.command == "verify":
                 require_clean(repo)
                 commits = verify_applied(repo, manifest)
-                print(f"Verified {len(commits)} ordered commit trees and patch SHA-256 digests")
+                print(
+                    f"Verified {len(commits)} ordered commit trees and patch SHA-256 digests"
+                )
             else:
                 rollback_bundle(repo, manifest)
     except (PatchsetError, OSError) as error:

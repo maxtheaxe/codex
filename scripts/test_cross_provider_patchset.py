@@ -31,12 +31,16 @@ class PatchsetTests(unittest.TestCase):
         self.commit(self.source, "binary feature")
         self.bundle = self.root / "bundle"
         self.target = self.root / "target"
-        self.git(self.root, "clone", "--no-hardlinks", str(self.source), str(self.target))
+        self.git(
+            self.root, "clone", "--no-hardlinks", str(self.source), str(self.target)
+        )
         self.configure(self.target)
         self.git(self.target, "checkout", "-b", "test-application", self.base)
 
     def git(self, repo, *args):
-        result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, text=True
+        )
         if result.returncode:
             self.fail(result.stderr)
         return result.stdout
@@ -51,7 +55,13 @@ class PatchsetTests(unittest.TestCase):
         self.git(repo, "commit", "-m", message)
 
     def run_helper(self, command, *extra, repo=None, success=True):
-        args = [sys.executable, str(HELPER), command, "--repo", str(repo or self.target)]
+        args = [
+            sys.executable,
+            str(HELPER),
+            command,
+            "--repo",
+            str(repo or self.target),
+        ]
         if command == "export":
             args += ["--base", self.base, "--output", str(self.bundle)]
         else:
@@ -88,7 +98,9 @@ class PatchsetTests(unittest.TestCase):
         saved_bundle = self.bundle
         self.bundle = self.root / "bundle-two"
         self.export()
-        self.assertEqual(original, {path.name: path.read_bytes() for path in self.bundle.iterdir()})
+        self.assertEqual(
+            original, {path.name: path.read_bytes() for path in self.bundle.iterdir()}
+        )
         self.assertTrue(saved_bundle.exists())
 
     def test_export_refuses_inside_source_or_another_worktree(self):
@@ -170,7 +182,9 @@ class PatchsetTests(unittest.TestCase):
         (self.target / "binary.dat").write_bytes(b"precious ignored data")
         self.assertEqual(self.git(self.target, "status", "--porcelain"), "")
         self.run_helper("apply", success=False)
-        self.assertEqual((self.target / "binary.dat").read_bytes(), b"precious ignored data")
+        self.assertEqual(
+            (self.target / "binary.dat").read_bytes(), b"precious ignored data"
+        )
         self.assertEqual(self.git(self.target, "rev-parse", "HEAD").strip(), self.base)
 
     def test_repository_hooks_are_not_executed(self):
@@ -204,7 +218,9 @@ class PatchsetTests(unittest.TestCase):
         manifest["schema"] = 1
         (self.bundle / "manifest.json").write_text(json.dumps(manifest))
         (self.bundle / "unexpected.txt").write_text("unexpected\n")
-        self.assertIn("unexpected files", self.run_helper("apply", success=False).stderr)
+        self.assertIn(
+            "unexpected files", self.run_helper("apply", success=False).stderr
+        )
 
 
 if __name__ == "__main__":

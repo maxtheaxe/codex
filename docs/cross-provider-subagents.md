@@ -56,13 +56,13 @@ descendant that switches back can inherit it again. Hosts implementing the
 No independent subprocess, second agent framework, or chat-completions bridge is
 involved. The reusable implementation points are:
 
-| Layer | Responsibility |
-| --- | --- |
-| `core/src/tools/handlers/multi_agents_spec.rs` | Advertise `model_provider` consistently with model overrides. |
-| `core/src/tools/handlers/multi_agents{,_v2}/spawn.rs` | Parse the selector and pass it into shared child configuration. |
-| `core/src/agent/child_config.rs` | Resolve and validate the child's provider/model before native thread creation. |
-| Native agent resume path | Restore the saved provider and apply child settings before cold reload. |
-| Existing provider/auth/client code | Send child inference using that provider's configured endpoint and credentials. |
+| Layer                                                 | Responsibility                                                                  |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `core/src/tools/handlers/multi_agents_spec.rs`        | Advertise `model_provider` consistently with model overrides.                   |
+| `core/src/tools/handlers/multi_agents{,_v2}/spawn.rs` | Parse the selector and pass it into shared child configuration.                 |
+| `core/src/agent/child_config.rs`                      | Resolve and validate the child's provider/model before native thread creation.  |
+| Native agent resume path                              | Restore the saved provider and apply child settings before cold reload.         |
+| Existing provider/auth/client code                    | Send child inference using that provider's configured endpoint and credentials. |
 
 Paths in this table are relative to `codex-rs/`. Provider selection is not a
 transport adapter: the selected endpoint must accept Codex's Responses API
