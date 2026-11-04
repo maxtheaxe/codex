@@ -55,7 +55,8 @@ storage. That warning is not itself a model-access diagnosis.
 The `cross-provider-preview-smoke.yml` workflow downloads the existing published
 archive and tests a fresh native Mac installation in an isolated home, including
 PATH setup, config import, synthetic login, and model responses from a loopback
-server. It does not compile binaries or call billable model endpoints. Its
+server through both `exec` and the interactive TUI. It does not compile binaries
+or call billable model endpoints. Its
 synthetic rejection/recovery checks are not a live ChatGPT entitlement test.
 The fixture's accepted model names are test inputs, not recommendations about
 which models a user's account supports. This checks installation and first-turn
@@ -128,13 +129,15 @@ existing-config and symlink protection, custom source homes, private file
 permissions, and errors that do not echo config values. The
 published archive also passed two installer runs in a Linux fixture with macOS
 platform commands simulated. The
-[native Mac install smoke run](https://github.com/maxtheaxe/codex/actions/runs/41888558501)
+[native Mac install and TUI smoke run](https://github.com/maxtheaxe/codex/actions/runs/41890754754)
 then passed all 30 installer/launcher tests and exercised the actual released
 archive on macOS 15.8.2 ARM64: fresh installation, PATH, config import with skipped
 auth, isolated synthetic API-key login, default-model rejection, explicit-model
-recovery, and a custom-provider request. Inference used a loopback server and
-synthetic credentials; this does not validate a real ChatGPT account or OpenRouter
-key. No binary rebuild was performed.
+recovery, and a custom-provider request. The interactive TUI also displayed the
+fixture rejection and returned the fixture's successful response after keeping
+an explicitly selected model through the first-run model-upgrade prompt.
+Inference used a loopback server and synthetic credentials; this does not
+validate a real ChatGPT account or OpenRouter key. No binary rebuild was performed.
 
 ### Optional one-time config import
 
