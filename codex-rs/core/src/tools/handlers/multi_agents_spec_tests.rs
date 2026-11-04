@@ -48,6 +48,7 @@ fn spawn_agent_tool_v2_requires_task_name() {
         Some(true)
     );
     assert!(properties.contains_key("fork_turns"));
+    assert!(properties.contains_key("model_provider"));
     assert!(!properties.contains_key("items"));
     assert!(!properties.contains_key("fork_context"));
     assert_eq!(
@@ -142,6 +143,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    assert!(properties.contains_key("model_provider"));
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::string(Some(format!(
@@ -232,7 +234,13 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         .as_ref()
         .expect("spawn_agent should use object params");
 
-    for property in ["agent_type", "model", "reasoning_effort", "service_tier"] {
+    for property in [
+        "agent_type",
+        "model",
+        "model_provider",
+        "reasoning_effort",
+        "service_tier",
+    ] {
         assert!(!properties.contains_key(property));
     }
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));

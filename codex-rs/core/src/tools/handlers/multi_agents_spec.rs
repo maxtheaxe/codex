@@ -128,6 +128,7 @@ pub fn create_spawn_agent_tool_v2(
     }
     if !options.expose_spawn_agent_model_overrides {
         properties.remove("model");
+        properties.remove("model_provider");
         properties.remove("reasoning_effort");
     }
     properties.insert(
@@ -637,6 +638,12 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
+            "model_provider".to_string(),
+            JsonSchema::string(Some(
+                "Configured model provider ID. When switching providers, specify an explicit model and start without parent history (fork_turns=none or fork_context=false).".to_string(),
+            )),
+        ),
+        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
@@ -674,6 +681,12 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             )),
         ),
         (
+            "model_provider".to_string(),
+            JsonSchema::string(Some(
+                "Configured model provider ID. When switching providers, specify an explicit model and start without parent history (fork_turns=none or fork_context=false).".to_string(),
+            )),
+        ),
+        (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
                 "Reasoning effort override for the new agent. Omit to inherit the parent effort."
@@ -686,6 +699,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
     properties.remove("model");
+    properties.remove("model_provider");
     properties.remove("reasoning_effort");
 }
 

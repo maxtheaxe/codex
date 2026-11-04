@@ -11,13 +11,16 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::openai_models::ModelOrigin;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::MultiAgentVersion;
+use std::sync::Arc;
 
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
 
@@ -41,6 +44,7 @@ pub(crate) struct SpawnConfigOptions<'a> {
     pub(crate) full_history_fork: bool,
     pub(crate) role_name: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
+    pub(crate) model_provider: Option<&'a str>,
     pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -61,18 +65,41 @@ pub(crate) async fn prepare_agent_spawn_config(
     if options.version == SpawnConfigVersion::V1 && options.full_history_fork {
         reject_full_fork_agent_type_override(options.role_name)?;
     }
+    let provider_switched = if let Some(provider) = options.model_provider {
+        let switched = select_agent_model_provider(&mut config, provider)?;
+        if switched && options.full_history_fork {
+            return Err("Cross-provider full-history forks are unsupported; specify model_provider and model with fork_turns=none (or fork_context=false).".to_string());
+        }
+        if switched && options.model.is_none_or(|model| model.trim().is_empty()) {
+            return Err(
+                "Switching model_provider requires an explicit nonempty model.".to_string(),
+            );
+        }
+        switched
+    } else {
+        false
+    };
+    let models_manager = spawn_models_manager(session, &config, provider_switched);
     apply_requested_spawn_agent_model_overrides(
-        session,
         step_context,
         &mut config,
         options.model,
         options.reasoning_effort,
+        &models_manager,
+        options.model_provider.is_some(),
+        provider_switched,
     )
     .await?;
+    let selected_model = config.model.clone();
+    let selected_effort = config.model_reasoning_effort.clone();
     if !options.full_history_fork
         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
     {
-        apply_spawn_agent_role(session, &mut config, options.role_name).await?;
+        if provider_switched {
+            apply_role_to_config(&mut config, options.role_name).await?;
+        } else {
+            apply_spawn_agent_role(&models_manager, &mut config, options.role_name).await?;
+        }
         if options.version == SpawnConfigVersion::V2
             && options.full_history_fork
             && config.developer_instructions.is_none()
@@ -82,7 +109,14 @@ pub(crate) async fn prepare_agent_spawn_config(
                 .clone_from(&turn.developer_instructions);
         }
     }
-    apply_spawn_agent_service_tier(session, &mut config).await?;
+    if provider_switched {
+        // The explicit cross-provider model must not be replaced by a role configured for the parent.
+        config.model = selected_model;
+        config.model_reasoning_effort = selected_effort;
+        config.service_tier = None;
+    } else {
+        apply_spawn_agent_service_tier(session, &mut config).await?;
+    }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
@@ -99,6 +133,64 @@ pub(crate) async fn prepare_agent_spawn_config(
         })
         .map(str::to_owned);
     Ok(PreparedSpawnConfig { config, role_name })
+}
+
+/// Select a registered provider while respecting managed policy. Returns whether it changed.
+pub(crate) fn select_agent_model_provider(config: &mut Config, id: &str) -> Result<bool, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("model_provider must be a nonempty configured provider ID.".to_string());
+    }
+    if let Some(required) = config.config_layer_stack.required_model_provider()
+        && required != id
+    {
+        return Err(format!(
+            "model_provider is managed and must be `{required}`."
+        ));
+    }
+    if config.model_provider_id == id {
+        return Ok(false);
+    }
+    let provider = config
+        .model_providers
+        .get(id)
+        .ok_or_else(|| format!("Unknown model_provider `{id}`; use a configured provider ID."))?
+        .clone();
+    config.model_provider_id = id.to_string();
+    config.model_provider = provider;
+    config.model_catalog = None;
+    config.model_context_window = None;
+    config.model_auto_compact_token_limit = None;
+    config.model_reasoning_effort = None;
+    config.model_reasoning_summary = None;
+    config.model_verbosity = None;
+    config.service_tier = None;
+    if matches!(
+        config.base_instructions_provenance,
+        Some(BaseInstructionsProvenance::Model { .. })
+    ) {
+        config.base_instructions = None;
+        config.base_instructions_provenance = None;
+    }
+    Ok(true)
+}
+
+fn spawn_models_manager(
+    session: &Session,
+    config: &Config,
+    provider_switched: bool,
+) -> SharedModelsManager {
+    if !provider_switched {
+        return Arc::clone(&session.services.models_manager);
+    }
+    let credentials = Arc::clone(&session.services.auth_manager);
+    let runtime = crate::runtime_auth::runtime_for_config(
+        &session.services.runtime_auth,
+        config,
+        Arc::clone(&credentials),
+        &session.installation_id,
+    );
+    crate::thread_manager::build_models_manager(config, credentials, runtime)
 }
 
 /// Builds the base config snapshot for a newly spawned sub-agent.
@@ -203,44 +295,64 @@ fn apply_spawn_agent_runtime_overrides(
 }
 
 async fn apply_requested_spawn_agent_model_overrides(
-    session: &Session,
     step_context: &StepContext,
     config: &mut Config,
     requested_model: Option<&str>,
     requested_reasoning_effort: Option<ReasoningEffort>,
+    models_manager: &SharedModelsManager,
+    provider_explicit: bool,
+    provider_switched: bool,
 ) -> Result<(), String> {
     let turn = step_context.turn.as_ref();
-    let requested_model = requested_model.or(turn.config.agent_default_subagent_model.as_deref());
-    let requested_reasoning_effort = requested_reasoning_effort
-        .or_else(|| turn.config.agent_default_subagent_reasoning_effort.clone());
+    let requested_model = requested_model.or_else(|| {
+        (!provider_switched)
+            .then_some(turn.config.agent_default_subagent_model.as_deref())
+            .flatten()
+    });
+    let requested_reasoning_effort = requested_reasoning_effort.or_else(|| {
+        (!provider_switched)
+            .then(|| turn.config.agent_default_subagent_reasoning_effort.clone())
+            .flatten()
+    });
     if requested_model.is_none() && requested_reasoning_effort.is_none() {
         return Ok(());
     }
 
     if let Some(requested_model) = requested_model {
-        let available_models = session
-            .services
-            .models_manager
+        let available_models = models_manager
             .list_models(RefreshStrategy::Offline, config.http_client_factory())
             .await;
-        let selected_model_name = find_spawn_agent_model_name(
+        let selected_model_name = match find_spawn_agent_model_name(
             &available_models,
             requested_model,
             turn.multi_agent_version,
-        )?;
-        let selected_model_info = session
-            .services
-            .models_manager
+        ) {
+            Ok(model) => model,
+            Err(_)
+                if provider_explicit
+                    && config.model_provider_id != "openai"
+                    && !available_models
+                        .iter()
+                        .any(|model| model.model == requested_model)
+                    && !requested_model.trim().is_empty() =>
+            {
+                requested_model.to_string()
+            }
+            Err(err) => return Err(err),
+        };
+        let selected_model_info = models_manager
             .get_model_info(&selected_model_name, &config.to_models_manager_config())
             .await;
 
         config.model = Some(selected_model_name.clone());
         if let Some(reasoning_effort) = requested_reasoning_effort {
-            validate_spawn_agent_reasoning_effort(
-                &selected_model_name,
-                &selected_model_info.supported_reasoning_levels,
-                &reasoning_effort,
-            )?;
+            if selected_model_info.origin != ModelOrigin::Synthetic {
+                validate_spawn_agent_reasoning_effort(
+                    &selected_model_name,
+                    &selected_model_info.supported_reasoning_levels,
+                    &reasoning_effort,
+                )?;
+            }
             config.model_reasoning_effort = Some(reasoning_effort);
         } else {
             config.model_reasoning_effort = selected_model_info.default_reasoning_level.clone();
@@ -290,7 +402,7 @@ pub(crate) async fn apply_spawn_agent_service_tier(
 }
 
 async fn apply_spawn_agent_role(
-    session: &Session,
+    models_manager: &SharedModelsManager,
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), String> {
@@ -308,9 +420,7 @@ async fn apply_spawn_agent_role(
     let model = config.model.clone().ok_or_else(|| {
         "spawn_agent could not resolve the child model for reasoning effort validation".to_string()
     })?;
-    let model_info = session
-        .services
-        .models_manager
+    let model_info = models_manager
         .get_model_info(&model, &config.to_models_manager_config())
         .await;
     if model_info.origin == ModelOrigin::Synthetic {

@@ -5,6 +5,7 @@ use crate::ThreadStoreBuilder;
 use crate::agent::child_config::apply_spawn_agent_service_tier;
 use crate::agent::child_config::build_agent_resume_config;
 use crate::agent::child_config::build_agent_spawn_config;
+use crate::agent::child_config::select_agent_model_provider;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
@@ -4740,4 +4741,36 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .set(AskForApproval::OnRequest)
         .expect("approval policy set");
     assert_eq!(config, expected);
+}
+
+#[tokio::test]
+async fn selecting_child_provider_resets_model_specific_settings() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    let providers = built_in_model_providers(None);
+    config
+        .model_providers
+        .insert("ollama".to_string(), providers["ollama"].clone());
+    config.model_provider_id = "openai".to_string();
+    config.model_provider = providers["openai"].clone();
+    config.model_context_window = Some(1234);
+    config.model_auto_compact_token_limit = Some(1000);
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config.model_reasoning_summary = Some(ReasoningSummary::Auto);
+    config.service_tier = Some("priority".to_string());
+    config.base_instructions = Some("parent model instructions".to_string());
+    config.base_instructions_provenance = Some(BaseInstructionsProvenance::Model {
+        model: "parent".to_string(),
+    });
+
+    assert!(select_agent_model_provider(&mut config, "ollama").unwrap());
+    assert_eq!(config.model_provider_id, "ollama");
+    assert!(config.model_context_window.is_none());
+    assert!(config.model_auto_compact_token_limit.is_none());
+    assert!(config.model_reasoning_effort.is_none());
+    assert!(config.model_reasoning_summary.is_none());
+    assert!(config.service_tier.is_none());
+    assert!(config.base_instructions.is_none());
+    assert!(!select_agent_model_provider(&mut config, "ollama").unwrap());
+    assert!(select_agent_model_provider(&mut config, "missing").is_err());
 }
