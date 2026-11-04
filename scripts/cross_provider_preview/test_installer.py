@@ -214,11 +214,12 @@ expose_spawn_agent_model_overrides = true
         )
         self.assertTrue(self.target.exists())
         self.preview_config.write_text('model = "my-preview-setting"\n')
-        result = self.install("--import-config", success=False)
-        self.assertIn("already exists; preserved", result.stderr)
-        self.assertEqual(
-            self.preview_config.read_text(), 'model = "my-preview-setting"\n'
-        )
+        for options in ((), ("--skip-unsupported",)):
+            result = self.install("--import-config", *options, success=False)
+            self.assertIn("already exists; preserved", result.stderr)
+            self.assertEqual(
+                self.preview_config.read_text(), 'model = "my-preview-setting"\n'
+            )
         self.assertFalse((self.root / "curl.log").exists())
 
     def test_import_does_not_write_config_if_archive_verification_fails(self):
@@ -345,6 +346,106 @@ auth = { command = "credential-helper-do-not-run" }
         self.assertEqual(result.stdout, "")
         self.assertFalse(self.preview_home.exists())
         self.assertFalse((self.root / "curl.log").exists())
+
+    def test_import_skips_openrouter_auth_and_installs_supported_settings(self):
+        self.normal_state.write_text("""
+model = "existing-model"
+log_dir = "/usual/logs"
+sqlite_home = "/usual/databases"
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+auth = { command = "credential-helper-do-not-run", args = ["fake-secret-do-not-log"] }
+""")
+        result = self.install(
+            "--import-config", "--skip-unsupported", "--archive", str(self.archive)
+        )
+        contents = self.preview_config.read_text()
+        imported = tomllib.loads(contents)
+        self.assertEqual(
+            imported,
+            {
+                "model": "existing-model",
+                "model_providers": {
+                    "openrouter": {
+                        "name": "OpenRouter",
+                        "base_url": "https://openrouter.ai/api/v1",
+                        "wire_api": "responses",
+                    }
+                },
+            },
+        )
+        notice = (
+            "Skipped unsupported provider fields: model_providers.openrouter.auth. "
+            "Credential-helper settings require manual setup."
+        )
+        self.assertEqual(result.stderr, "codex-preview import: " + notice + "\n")
+        self.assertIn("# " + notice, contents)
+        for omitted in ("fake-secret", "credential-helper-do-not-run", "/usual/"):
+            self.assertNotIn(omitted, contents + result.stdout + result.stderr)
+        self.assertTrue(self.target.is_dir())
+        self.assertEqual(self.profile.read_text().count("export PATH="), 1)
+        self.assertFalse((self.preview_home / "auth.json").exists())
+        self.assertEqual(self.preview_config.stat().st_mode & 0o777, 0o600)
+
+    def test_import_only_skips_multiple_fields_and_preserves_env_auth(self):
+        self.normal_state.write_text(r"""
+[model_providers."router.secondary"]
+name = "accepted-name-do-not-log"
+base_url = "https://endpoint-do-not-log.invalid/v1"
+env_key = "EXISTING_KEY_ENV"
+experimental_bearer_token = "fake-secret-do-not-log"
+http_headers = { Authorization = "fake-secret-do-not-log" }
+"custom\nfield" = { sqlite_home = "/usual/databases" }
+""")
+        result = self.install("--import-config-only", "--skip-unsupported")
+        contents = self.preview_config.read_text()
+        imported = tomllib.loads(contents)
+        self.assertEqual(
+            imported["model_providers"]["router.secondary"],
+            {
+                "name": "accepted-name-do-not-log",
+                "base_url": "https://endpoint-do-not-log.invalid/v1",
+                "env_key": "EXISTING_KEY_ENV",
+            },
+        )
+        self.assertEqual(
+            result.stderr,
+            "codex-preview import: Skipped unsupported provider fields: "
+            'model_providers."router.secondary"."custom\\nfield", '
+            'model_providers."router.secondary".experimental_bearer_token, '
+            'model_providers."router.secondary".http_headers. '
+            "These provider settings require manual setup.\n",
+        )
+        self.assertNotIn("fake-secret", contents + result.stdout + result.stderr)
+        self.assertNotIn("/usual/", contents)
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.root / "curl.log").exists())
+
+    def test_skip_unsupported_still_rejects_invalid_supported_fields(self):
+        for entry in (
+            'base_url = "https://fake-secret-do-not-log@openrouter.ai/v1"',
+            'wire_api = "chat"',
+            'env_key = ["fake-secret-do-not-log"]',
+            'env_http_headers = { Authorization = "fake-secret-do-not-log" }',
+        ):
+            with self.subTest(field=entry.split(" =")[0]):
+                self.normal_state.write_text(
+                    "[model_providers.openrouter]\n"
+                    'auth = { command = "credential-helper-do-not-run" }\n'
+                    + entry
+                    + "\n"
+                )
+                result = self.install(
+                    "--import-config", "--skip-unsupported", success=False
+                )
+                self.assertIn(
+                    "model_providers.openrouter." + entry.split(" =")[0], result.stderr
+                )
+                self.assertNotIn("fake-secret", result.stdout + result.stderr)
+                self.assertFalse(self.preview_home.exists())
+                self.assertFalse((self.root / "curl.log").exists())
 
     def test_import_rejects_unsupported_auth_or_provider_routes_before_download(self):
         for entry in (
@@ -493,6 +594,7 @@ auth = { command = "credential-helper-do-not-run" }
         for arguments in (
             ("--archive",),
             ("--unknown",),
+            ("--skip-unsupported",),
             ("--import-config-only", "--archive", str(self.archive)),
         ):
             with self.subTest(arguments=arguments):

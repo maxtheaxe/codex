@@ -132,6 +132,28 @@ that credential-helper settings require manual setup. Accepted fields such as
 `name`, `base_url`, and `wire_api` are not listed as rejected fields.
 Unsupported `wire_api` values are rejected rather than rewritten.
 
+To import the supported settings while skipping unsupported provider fields,
+add `--skip-unsupported`:
+
+```sh
+bash codex-preview-install.sh --import-config --skip-unsupported
+```
+
+For an already installed preview, use
+`--import-config-only --skip-unsupported`. The option reports only skipped field
+paths and records the same notice as a comment in the imported config. For
+example, it skips `model_providers.openrouter.auth` while preserving `name`,
+`base_url`, and `wire_api`. It never copies or runs the omitted credential helper.
+
+Skipping `auth` does not configure replacement authentication. Before using that
+provider, either configure its credential helper manually in the preview or add
+`env_key = "OPENROUTER_API_KEY"` to the **existing**
+`[model_providers.openrouter]` table and export that key in the launching terminal.
+Existing valid `env_key` references are retained. Invalid supported field values
+(including URLs, protocols, types, and environment-variable references), malformed
+TOML, symlinked preview homes, and existing preview configs still stop the import.
+Without this option, unsupported provider fields continue to stop the import.
+
 This copies only the selected entries in the base config file. It does not follow
 profiles or copy credential files, logs, databases, storage paths, permissions,
 project trust, hooks, MCP servers, plugins, or integrations. Existing environment

@@ -11,6 +11,7 @@ preview_archive_input=''
 preview_update_path=true
 preview_import_config=false
 preview_import_only=false
+preview_skip_unsupported=false
 preview_stage_dir=''
 preview_lock_dir=''
 preview_lock_owned=false
@@ -22,8 +23,8 @@ fail() {
 
 usage() {
   cat <<'EOF'
-Usage: bash install.sh [--archive FILE] [--no-path] [--import-config]
-       bash install.sh --import-config-only
+Usage: bash install.sh [--archive FILE] [--no-path] [--import-config [--skip-unsupported]]
+       bash install.sh --import-config-only [--skip-unsupported]
 
 Install the verified Apple-silicon preview.3 for macOS 15 or newer.
   --archive FILE  Use an already downloaded archive instead of downloading it.
@@ -34,6 +35,10 @@ Install the verified Apple-silicon preview.3 for macOS 15 or newer.
   --import-config-only
                   Import settings without downloading/installing the package
                   or changing PATH. Use this if preview is already installed.
+  --skip-unsupported
+                  Skip provider fields outside the import allowlist, reporting
+                  their names only. Requires an import option. Skipped auth
+                  needs manual setup; invalid supported fields still stop import.
   -h, --help      Show this help.
 
 Installs into ~/Applications/codex-cross-provider-preview.
@@ -59,12 +64,16 @@ while [[ $# -gt 0 ]]; do
     --no-path) preview_update_path=false; shift ;;
     --import-config) preview_import_config=true; shift ;;
     --import-config-only) preview_import_config=true; preview_import_only=true; shift ;;
+    --skip-unsupported) preview_skip_unsupported=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1 (use --help)" ;;
   esac
 done
 if "$preview_import_only" && [[ -n "$preview_archive_input" ]]; then
   fail '--import-config-only cannot be combined with --archive'
+fi
+if "$preview_skip_unsupported" && ! "$preview_import_config"; then
+  fail '--skip-unsupported requires --import-config or --import-config-only'
 fi
 
 [[ "$(uname -s)" == Darwin ]] || fail 'this package requires macOS'
@@ -84,7 +93,7 @@ esac
 
 import_preview_config() {
   command -v python3 >/dev/null || fail 'config import requires python3 (Python 3.11 or newer) on PATH'
-  python3 -I - "$1" "${CODEX_HOME:-$HOME/.codex}/config.toml" "$HOME/.codex-cross-provider-preview" <<'PYTHON_IMPORT'
+  python3 -I - "$1" "${CODEX_HOME:-$HOME/.codex}/config.toml" "$HOME/.codex-cross-provider-preview" "$preview_skip_unsupported" <<'PYTHON_IMPORT'
 import json
 import os
 from pathlib import Path
@@ -163,7 +172,8 @@ def serialize(table, path=()):
 
 
 def main():
-    mode, source_name, preview_name = sys.argv[1:]
+    mode, source_name, preview_name, skip_unsupported = sys.argv[1:]
+    skipped = []
     source = Path(source_name)
     preview = Path(preview_name)
     destination = preview / "config.toml"
@@ -227,7 +237,9 @@ def main():
                 if "auth" in unsupported
                 else "These provider settings require manual setup."
             )
-            reject(f"unsupported provider fields: {fields}. {guidance}")
+            if skip_unsupported != "true":
+                reject(f"unsupported provider fields: {fields}. {guidance}")
+            skipped.append(f"Skipped unsupported provider fields: {fields}. {guidance}")
         imported = select(provider, provider_schema, path)
         if imported.get("wire_api", "responses") != "responses":
             reject(
@@ -302,6 +314,7 @@ def main():
         reject("no supported settings or providers found in the source config")
     rendered = (
         "# One-time import of selected Codex settings.\n"
+        + "".join(f"# {message}\n" for message in skipped)
         + "\n".join(serialize(selected))
         + "\n"
     )
@@ -338,6 +351,8 @@ def main():
             os.unlink(temporary, dir_fd=directory)
     finally:
         os.close(directory)
+    for message in skipped:
+        print("codex-preview import: " + message, file=sys.stderr)
     print("Imported selected settings into ~/.codex-cross-provider-preview/config.toml")
     print(
         "Source config was only read. Login, storage paths, profiles, permissions, hooks and integrations were not imported."
