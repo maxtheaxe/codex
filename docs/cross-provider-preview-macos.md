@@ -60,6 +60,29 @@ tar -xzf codex-cross-provider-aarch64-apple-darwin.tar.gz \
 "$HOME/Applications/codex-cross-provider-preview/codex-preview" --version
 ```
 
+### Add codex-preview to PATH
+
+Add the package directory to your `PATH` so you can run `codex-preview` from
+any directory. For the default macOS shell, zsh, these commands save the setting
+in `~/.zshrc` and enable it in your current terminal:
+
+```sh
+preview_path_line='export PATH="$HOME/Applications/codex-cross-provider-preview:$PATH"'
+grep -Fqx "$preview_path_line" "$HOME/.zshrc" 2>/dev/null ||
+  printf '\n%s\n' "$preview_path_line" >> "$HOME/.zshrc"
+export PATH="$HOME/Applications/codex-cross-provider-preview:$PATH"
+command -v codex-preview
+codex-preview --version
+```
+
+`command -v` should print
+`/Users/<your-name>/Applications/codex-cross-provider-preview/codex-preview`.
+Future interactive zsh terminals will pick up the saved setting automatically.
+If you use Bash, use `~/.bash_profile` in place of `~/.zshrc` above. Keep the
+launcher in the extracted package directory: it finds the bundled binaries
+relative to its own location. Add the package root to `PATH`, not its `bin`
+directory, so your usual `codex` command keeps resolving to your normal install.
+
 Use an empty destination for each version. Run the included `codex-preview`
 launcher rather than `bin/codex`. It sets `CODEX_HOME` to
 `~/.codex-cross-provider-preview`, creates it with private permissions, and uses
@@ -69,9 +92,9 @@ overrides that redirect storage to your normal installation. Authentication
 files contain secrets; do not commit or share them.
 
 Your usual `codex` command and desktop app remain installed in their existing
-locations. No administrator privileges, Homebrew/npm replacement, PATH changes,
-or background service are required. The preview still has access to the project
-you run it in under its normal approval and sandbox policy. Start in a disposable
+locations. No administrator privileges, Homebrew/npm replacement, or background
+service are required. The preview still has access to the project you run it in
+under its normal approval and sandbox policy. Start in a disposable
 checkout and avoid running two agents against the same working tree.
 
 The binaries have local ad-hoc signatures, not an Apple Developer ID signature
@@ -84,7 +107,7 @@ Gatekeeper prompt or login flow on your Mac.
 Sign in independently for the preview:
 
 ```sh
-"$HOME/Applications/codex-cross-provider-preview/codex-preview" login
+codex-preview login
 ```
 
 Create `~/.codex-cross-provider-preview/config.toml` using the provider examples
@@ -108,10 +131,11 @@ package version and GitHub tag identify this preview.
 
 ## Remove or rebuild
 
-Stop preview sessions and remove the extracted preview directory. Your usual
-installation remains available. The separate `~/.codex-cross-provider-preview`
-directory holds preview sessions and credentials; retain it if desired or delete
-it separately. No system-wide rollback is needed.
+Stop preview sessions and remove the extracted preview directory. Remove the
+preview `export PATH=...` line from `~/.zshrc` (or `~/.bash_profile` for Bash),
+then open a new terminal. Your usual installation remains available. The separate
+`~/.codex-cross-provider-preview` directory holds preview sessions and credentials;
+retain it if desired or delete it separately. No system-wide rollback is needed.
 
 The dedicated `cross-provider-preview-macos.yml` workflow builds only
 `aarch64-apple-darwin` on the standard public `macos-15` runner. It runs for
