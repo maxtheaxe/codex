@@ -5,6 +5,7 @@ use super::spawn_telemetry::SpawnMeasurements;
 use super::spawn_telemetry::record_spawn_success;
 use super::*;
 use crate::agent::child_config::build_agent_resume_config;
+use crate::agent::child_config::select_agent_model_provider;
 use crate::agent::history::load_agent_model_context;
 use crate::agent::history::prepare_forked_history;
 use crate::agent::role::apply_role_to_config;
@@ -347,7 +348,7 @@ impl LocalAgentControl {
         } else {
             None
         };
-        config.model_reasoning_effort = stored_reasoning_effort;
+        config.model_reasoning_effort = stored_reasoning_effort.clone();
         if let Some(role_name) = session_source.get_agent_role() {
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
@@ -388,18 +389,9 @@ impl LocalAgentControl {
         if let Some(model) = stored_model {
             config.model = Some(model);
         }
-        if config.model_provider_id != stored_model_provider {
-            config.model_provider = config
-                .model_providers
-                .get(&stored_model_provider)
-                .cloned()
-                .ok_or_else(|| {
-                    CodexErr::InvalidRequest(format!(
-                        "Model provider `{stored_model_provider}` not found"
-                    ))
-                })?;
-            config.model_provider_id = stored_model_provider;
-        }
+        select_agent_model_provider(&mut config, &stored_model_provider)
+            .map_err(CodexErr::InvalidRequest)?;
+        config.model_reasoning_effort = stored_reasoning_effort;
         let parent_thread_id = owner_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id())
             .or(stored_parent_thread_id);
@@ -1008,7 +1000,7 @@ impl LocalAgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
@@ -1020,6 +1012,15 @@ impl LocalAgentControl {
                 include_history: false,
             })
             .await?;
+        // A resumed child keeps its own provider/model even when the caller uses a
+        // different provider. Resolve credentials through the current registry and
+        // recheck managed provider requirements before replaying saved context.
+        select_agent_model_provider(&mut config, &stored_thread.model_provider)
+            .map_err(CodexErr::InvalidRequest)?;
+        if let Some(model) = stored_thread.model.clone() {
+            config.model = Some(model);
+        }
+        config.model_reasoning_effort = stored_thread.reasoning_effort.clone();
         let resumed_agent_path = stored_thread
             .agent_path
             .as_deref()

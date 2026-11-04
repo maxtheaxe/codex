@@ -5245,6 +5245,82 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
         .expect("resumed child shutdown should succeed");
 }
 
+#[test_case::test_case("openai", "openrouter"; "openai_parent_openrouter_child")]
+#[test_case::test_case("openrouter", "openai"; "openrouter_parent_openai_child")]
+#[tokio::test]
+async fn resume_agent_from_rollout_preserves_child_provider(
+    parent_provider: &str,
+    child_provider: &str,
+) {
+    let (home, mut config) = test_config().await;
+    let mut openrouter = config.model_providers["ollama"].clone();
+    openrouter.name = "OpenRouter test provider".to_string();
+    config
+        .model_providers
+        .insert("openrouter".to_string(), openrouter);
+    config.model_provider_id = parent_provider.to_string();
+    config.model_provider = config.model_providers[parent_provider].clone();
+    config.model_context_window = Some(8_000);
+    config.model_auto_compact_token_limit = Some(4_000);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let mut child_config = harness.config.clone();
+    crate::agent::child_config::select_agent_model_provider(&mut child_config, child_provider)
+        .expect("select the child provider");
+    child_config.model = Some("gpt-5.6-sol".to_string());
+    child_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    let child_id = harness
+        .control
+        .spawn_agent(
+            child_config,
+            text_input("child task"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("spawn child");
+    let child = harness
+        .manager
+        .get_thread(child_id)
+        .await
+        .expect("child exists");
+    persist_thread_for_tree_resume(&child, "cross-provider saved context").await;
+    harness
+        .control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("shut down child");
+
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child_id, SessionSource::Exec)
+        .await
+        .expect("resume through a caller using another provider");
+    let resumed = harness
+        .manager
+        .get_thread(child_id)
+        .await
+        .expect("resumed child exists");
+    let snapshot = resumed.config_snapshot().await;
+    assert_eq!(snapshot.model_provider_id, child_provider);
+    assert_eq!(snapshot.model, "gpt-5.6-sol");
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::High));
+    let resumed_config = resumed.session.get_config().await;
+    assert_eq!(
+        resumed_config.model_provider,
+        harness.config.model_providers[child_provider]
+    );
+    assert_eq!(resumed_config.model_context_window, None);
+    assert_eq!(resumed_config.model_auto_compact_token_limit, None);
+    assert!(history_contains_text(
+        resumed.session.clone_history().await.raw_items(),
+        "cross-provider saved context",
+    ));
+    harness
+        .control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("shut down resumed child");
+}
+
 #[test_case::test_case(vec!["child-plugin".to_string()]; "saved disabled plugin")]
 #[test_case::test_case(Vec::new(); "saved empty selection")]
 #[tokio::test]
